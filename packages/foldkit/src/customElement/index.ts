@@ -1,4 +1,4 @@
-import { Array, type Schema, String, pipe } from 'effect'
+import { Array, Exit, Option, Schema, String, pipe } from 'effect'
 
 import type { Attribute, Child, Html } from '../html/index.js'
 import {
@@ -124,8 +124,19 @@ const eventFactoryName = (eventName: string): string =>
  * `.withMessage<Message>()` factory that yields a typed `ElementBuilder` for
  * the consumer's Message universe.
  *
- * Property changes diff across renders; declared `CustomEvent`s are
- * converted to Messages by the runtime.
+ * Property changes diff across renders. Declared events are decoded to
+ * Messages by the runtime: the declared `events` Schema runs against each
+ * event's `detail` (a browser `CustomEvent`, or an `Event` subclass that
+ * carries one) or, when there is no `detail`, against the event object itself
+ * (an `Event` subclass exposing its payload as own properties). A successful
+ * decode dispatches the mapped Message; a decode failure is dropped and warns,
+ * so a declared schema that does not match the payload fails safely.
+ *
+ * This declarative path is observe-and-map only. Reach for `Mount.defineStream`
+ * when an event is cancelable and needs a synchronous `preventDefault`, when a
+ * payload is split across both `detail` and event-level fields (the decoder
+ * reads one or the other, never a merge), or when a payload is exposed through
+ * a prototype getter rather than an own property.
  *
  * @example
  * ```ts
@@ -187,13 +198,38 @@ export const define = <
       ): Attribute<Message> => Prop({ key: propertyName, value })
     }
 
-    for (const eventName of eventNames) {
+    for (const [eventName, eventSchema] of Object.entries(config.events)) {
+      // NOTE: type-only assertion that this event schema has no
+      // `DecodingServices`, required by the sync `decodeUnknownExit`. It erases
+      // the compile-time `Type` only; the runtime decode below still validates
+      // against the real schema, so a service-requiring schema yields a
+      // drop + warn at runtime, not a type error.
+      /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+      const eventDecoder = eventSchema as Schema.Decoder<unknown>
+      const decode = Schema.decodeUnknownExit(eventDecoder)
       builder[eventFactoryName(eventName)] = (
         toMessage: (detail: unknown) => Message,
       ): Attribute<Message> =>
         OnCustomEvent({
           name: eventName,
-          f: event => toMessage(event.detail),
+          f: event => {
+            // NOTE: `??` (not `||`) keeps a falsy-but-valid detail (0, '',
+            // false); only an absent or null detail falls through to decoding
+            // the event itself, supporting Event subclasses that carry their
+            // payload as own properties rather than on `detail`.
+            /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+            const source = (event as { detail?: unknown }).detail ?? event
+            return Exit.match(decode(source), {
+              onFailure: cause => {
+                console.warn(
+                  `[foldkit:customElement] event "${eventName}" payload did not match its declared schema`,
+                  cause,
+                )
+                return Option.none()
+              },
+              onSuccess: data => Option.some(toMessage(data)),
+            })
+          },
         })
     }
 

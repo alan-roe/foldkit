@@ -9,7 +9,7 @@ import {
   styleModule,
   toVNode,
 } from 'snabbdom'
-import { expect } from 'vitest'
+import { expect, vi } from 'vitest'
 
 import {
   __clearRuntime as clearHtmlRuntime,
@@ -193,6 +193,134 @@ describe('CustomElement.define', () => {
       'change-rating',
       'clear-rating',
     ])
+  })
+})
+
+describe('CustomElement event decoding', () => {
+  it('decodes an Event subclass that carries a detail', () => {
+    class ChangeRatingEvent extends Event {
+      readonly detail: { readonly value: number }
+      constructor(detail: { readonly value: number }) {
+        super('change-rating')
+        this.detail = detail
+      }
+    }
+
+    const rating = emojiRating.withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      rating([
+        rating.OnChangeRating(detail => RatingChanged({ value: detail.value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    element.dispatchEvent(new ChangeRatingEvent({ value: 5 }))
+
+    expect(dispatched).toStrictEqual([RatingChanged({ value: 5 })])
+  })
+
+  it('decodes an Event subclass exposing its payload as own properties', () => {
+    class ChangeRatingEvent extends Event {
+      readonly value: number
+      constructor(value: number) {
+        super('change-rating')
+        this.value = value
+      }
+    }
+
+    const rating = emojiRating.withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      rating([
+        rating.OnChangeRating(detail => RatingChanged({ value: detail.value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    element.dispatchEvent(new ChangeRatingEvent(5))
+
+    expect(dispatched).toStrictEqual([RatingChanged({ value: 5 })])
+  })
+
+  it('drops a same-named event whose payload does not decode', () => {
+    const rating = emojiRating.withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      rating([
+        rating.OnChangeRating(detail => RatingChanged({ value: detail.value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    element.dispatchEvent(new Event('change-rating'))
+
+    expect(dispatched).toStrictEqual([])
+  })
+
+  it('drops and warns when the payload does not match the declared schema', () => {
+    const rating = emojiRating.withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      rating([
+        rating.OnChangeRating(detail => RatingChanged({ value: detail.value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      element.dispatchEvent(
+        new CustomEvent('change-rating', { detail: { value: 'not a number' } }),
+      )
+      expect(dispatched).toStrictEqual([])
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps a falsy but valid detail instead of falling through to the event', () => {
+    const scalarRating = CustomElement.define({
+      tag: 'fk-scalar-rating',
+      properties: {},
+      events: { 'set-rating': S.Number },
+    }).withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      scalarRating([
+        scalarRating.OnSetRating(value => RatingChanged({ value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    element.dispatchEvent(new CustomEvent('set-rating', { detail: 0 }))
+
+    expect(dispatched).toStrictEqual([RatingChanged({ value: 0 })])
+  })
+
+  it('drops a direct-property event whose payload is a prototype getter', () => {
+    class GetterRatingEvent extends Event {
+      constructor() {
+        super('change-rating')
+      }
+      get value(): number {
+        return 5
+      }
+    }
+
+    const rating = emojiRating.withMessage<Message>()
+    const { dispatch, dispatched } = createCapturingDispatch()
+
+    const view = () =>
+      rating([
+        rating.OnChangeRating(detail => RatingChanged({ value: detail.value })),
+      ])
+    const element = patchInto(renderView(view, dispatch))
+
+    element.dispatchEvent(new GetterRatingEvent())
+
+    expect(dispatched).toStrictEqual([])
   })
 })
 
