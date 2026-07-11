@@ -101,12 +101,31 @@ truth comes from the lustre-benchmark slot below.
   pause are swallowed, resume restores live dispatch and exact live DOM, and
   the store's allocated signal count stays flat across repeated history
   sweeps.
+- Browser wall-clock (lustre-benchmark runbook, headless Chromium, 100 items,
+  add/toggle/destroy, two runs with consistent ordering; second warmer run
+  shown):
+
+| Implementation              | Total    |
+| --------------------------- | -------- |
+| Svelte 5.25.7 (optimised)   | 59.2 ms  |
+| Elm 0.19.1 (optimised)      | 74.8 ms  |
+| Solid 1.9.5                 | 95.7 ms  |
+| Lustre 5.5.0 (optimised)    | 99.5 ms  |
+| Foldkit 0.127.0-finegrained | 104.5 ms |
+| Vue 3.5.13                  | 129.0 ms |
+| React 19.1.0 (optimised)    | 143.2 ms |
+| Foldkit 0.127.0 (optimised) | 270.3 ms |
+| Foldkit 0.127.0 (naive)     | 540.7 ms |
+
+The fine-grained slot lands in the Solid and Lustre tier (within 10 percent
+of Solid), 2.6x faster than the optimised snabbdom slot and 5.2x faster than
+the naive one, ahead of Vue and React. Single-machine directional numbers,
+not a controlled rig.
 
 ## Remaining
 
-- Collect browser wall-clock numbers by running the lustre-benchmark runbook
-  in Chrome across all three slots; later add a js-framework-benchmark keyed
-  entry.
+- js-framework-benchmark keyed entry for standardized cross-framework
+  numbers.
 - Migration epic: unify authoring on the existing `html<Message>()` surface
   (bindings subsume `createLazy` / `createKeyedLazy`), migrate the example
   apps, then swap the lustre finegrained slot's hand-rolled loop to
