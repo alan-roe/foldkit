@@ -445,6 +445,54 @@ type RowState<Item> = Readonly<{
 }>
 
 /**
+ * Removes every node strictly between `start` and `end` (both of which
+ * survive), walking backward from `end.previousSibling`. Back-to-front
+ * order means each `removeChild` drops the *last* child of whatever
+ * remains rather than the first - no subsequent siblings ever need to
+ * shift down an index because of it, which is the difference between this
+ * and a front-to-back loop under a DOM implementation whose child list is
+ * a plain array (as in this project's `happy-dom` test/bench harness;
+ * V8/Blink's own child-list representation is not a flat array, so a real
+ * browser does not pay that asymmetry - see {@link setupList}'s docstring
+ * for the measurements that motivated this). Used for the List clear fast
+ * path, where the DOM between the two anchors is dropped as a unit ahead
+ * of per-row owner disposal instead of interleaved with it.
+ */
+const detachRange = (
+  parent: Node & ParentNode,
+  start: Node,
+  end: Node,
+): void => {
+  let node = end.previousSibling
+  while (node !== null && node !== start) {
+    const prev = node.previousSibling
+    parent.removeChild(node)
+    node = prev
+  }
+}
+
+/**
+ * Tears down one row's reactive owner (listener cleanup, signal/effect
+ * unlinking - identical either way) and, when `detachDom` is `true`, also
+ * removes its DOM nodes one at a time. Pass `false` from a call site that
+ * has already bulk-detached the row's nodes (see {@link detachRange}) so
+ * disposal never re-removes (and doesn't throw attempting to remove)
+ * nodes that are no longer attached.
+ */
+const disposeRow = <Item>(
+  parent: Node & ParentNode,
+  row: RowState<Item>,
+  detachDom: boolean,
+): void => {
+  disposeOwner(row.owner)
+  if (detachDom) {
+    for (const node of row.nodes) {
+      parent.removeChild(node)
+    }
+  }
+}
+
+/**
  * One render effect reads `select(model)` and keyed-diffs it against the
  * previous run's `rows`: removed keys are disposed (`disposeOwner`) and
  * their DOM removed; every surviving key gets `itemSignal.write(item)`
@@ -457,9 +505,32 @@ type RowState<Item> = Readonly<{
  * cached per-`List` template rather than recursing through
  * `createElement`/`setAttribute` for every node.
  *
+ * A `List` gets a second `Comment` anchor (`endAnchor`), placed once right
+ * after `anchor` before the first effect run, so the row range always has
+ * a fixed end boundary independent of what follows the list in `parent`
+ * (another sibling, nothing, or - after this List's own first row - the
+ * first row itself). The fidelity comparison serializer drops `Comment`
+ * nodes, so this costs nothing there.
+ *
  * NOTE: an empty next selection skips the keyed diff entirely - no
  * `nextKeys` Set, no per-row lookup - since every row is being torn down
- * regardless of key; this is the 1000 -> 0 "clear" transition.
+ * regardless of key; this is the 1000 -> 0 "clear" transition. Measured
+ * against this project's `happy-dom` bench/test harness with 1000 rows
+ * (a `<li>` with a nested `<input>` carrying a listener - see
+ * `src/test/apps/renderCompare/viewBound.ts`): a front-to-back
+ * `removeChild` loop (the naive approach) ran ~2-4.5ms with occasional
+ * spikes past 9ms; the same loop back-to-front (now {@link detachRange})
+ * ran a consistent ~1.6-2.5ms; `parent.replaceChildren(anchor, endAnchor)`
+ * (only usable when the list is `parent`'s sole content) was
+ * statistically indistinguishable from the back-to-front loop
+ * (~1.5-2.2ms) - not worth a second code path for. A `Range` spanning the
+ * two anchors with `deleteContents()` was tried and abandoned: happy-dom's
+ * implementation walks the tree with `Node.following()` under the hood
+ * rather than using a flat splice, and at 1000 rows that walk alone blew
+ * well past a 30s budget - two to three orders of magnitude slower than
+ * any `removeChild`-based approach here. `detachRange` is the winner: one
+ * code path, no sole-content branch, and it is the DOM manipulation a
+ * `Range` would have to reimplement anyway if it worked.
  */
 const setupList = <Model, Message, Item>(
   parent: Node & ParentNode,
@@ -470,6 +541,8 @@ const setupList = <Model, Message, Item>(
 ): void => {
   const rows = new Map<string, RowState<Item>>()
   const listOwner = makeOwner(getCurrentOwner())
+  const endAnchor = ctx.document.createComment('/List')
+  parent.insertBefore(endAnchor, anchor.nextSibling)
 
   runWithOwner(listOwner, () => {
     makeRenderEffect(() => {
@@ -478,11 +551,9 @@ const setupList = <Model, Message, Item>(
 
       if (items.length === 0) {
         if (rows.size > 0) {
+          detachRange(parent, anchor, endAnchor)
           for (const row of rows.values()) {
-            disposeOwner(row.owner)
-            for (const node of row.nodes) {
-              parent.removeChild(node)
-            }
+            disposeRow(parent, row, false)
           }
           rows.clear()
         }
@@ -495,10 +566,7 @@ const setupList = <Model, Message, Item>(
         if (nextKeys.has(key)) {
           continue
         }
-        disposeOwner(row.owner)
-        for (const node of row.nodes) {
-          parent.removeChild(node)
-        }
+        disposeRow(parent, row, true)
         rows.delete(key)
       }
 

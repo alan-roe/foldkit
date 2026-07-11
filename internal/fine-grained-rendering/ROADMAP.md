@@ -61,7 +61,7 @@ derived render cache and never authoritative state.
 | update every 10th | 28.2 ms  | 5.2 ms           | 100 vs 100         | 5.4x    |
 | toggle 1 of 1,000 | 26.2 ms  | 3.6 ms (min 0.9) | 1 vs 2             | 7.2x    |
 | reverse 1,000     | 37.9 ms  | 12.1 ms          | 999 vs 999         | 3.1x    |
-| clear 1,000       | 4.1 ms   | 4.7 ms           | 1,000 vs 1,000     | 0.88x   |
+| clear 1,000       | 4.1 ms   | 6.5 ms           | 1,000 vs 1,000     | 0.64x   |
 
 Deterministic counts are stable across runs; happy-dom wall medians for the
 sub-millisecond scenarios are noisy (toggle's minimum holds near 0.8 ms while
@@ -75,8 +75,19 @@ truth comes from the lustre-benchmark slot below.
   fall back to direct construction.
 - Teardown via intrusive doubly-linked owner children and dependency edges per
   solid-signals, plus an empty-selection List fast path. Disposal of 1,000
-  rows is now sub-millisecond; the remaining clear-all gap is the per-node
-  `removeChild` floor shared with the old path.
+  rows is now sub-millisecond.
+- Clear-all bulk detachment: each List keeps a start and end anchor Comment;
+  the empty-selection path detaches the whole row range back to front in one
+  pass, then disposes row owners with per-row DOM removal suppressed. The
+  residual happy-dom gap (6.5 ms vs 4.1 ms) is an artifact of happy-dom's
+  array-backed childNodes, where removeChild is O(n) and Range.deleteContents
+  is pathological; real browsers keep child lists as linked lists with O(1)
+  removeChild. Measured in real Chromium (TodoMVC clear-completed with 1,000
+  completed rows, MutationObserver-free rAF timing, four rounds): fine-grained
+  completes in one frame (6.9 to 18.4 ms including rAF latency, stable) while
+  the optimised snabbdom slot needs two frames (32.4 to 32.7 ms). The
+  regression does not exist outside happy-dom; the fine-grained path is about
+  1.75x faster there.
 - Runtime seam: `makeApplication` and `makeElement` accept `bindView` as a
   type-level either-or with `view` (runtime backstop for untyped callers).
   First render mounts the binding tree against the Model store; every later
