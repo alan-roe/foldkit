@@ -77,25 +77,40 @@ truth comes from the lustre-benchmark slot below.
   solid-signals, plus an empty-selection List fast path. Disposal of 1,000
   rows is now sub-millisecond; the remaining clear-all gap is the per-node
   `removeChild` floor shared with the old path.
+- Runtime seam: `makeApplication` and `makeElement` accept `bindView` as a
+  type-level either-or with `view` (runtime backstop for untyped callers).
+  First render mounts the binding tree against the Model store; every later
+  tick is `reconcile` plus `flush`, measured as new slow phases `Reconcile`
+  and `Flush`. Dispatch reaches listeners through one stable function
+  delegating to a swappable target, so pause and replay never re-mount.
+  deepFreeze compatibility pinned by test.
+- Scene dual-target: `bindView` programs run through the pure materializer
+  adapted to the VNode shape Scene already walks. Locators, matchers,
+  interactions, and keyed assertions work unchanged; `toHaveHook` fails with
+  an explicit message on the fine-grained path instead of passing silently.
+- Bind surface at `foldkit/experimental`: control-flow helpers `when` and
+  `matchTag`, ergonomic tag constructors, PascalCase attribute conveniences
+  matching the html factory (`Class`, `Id`, `Type`, `For`, ...).
+- Browser slot: `internal/lustre-benchmark` builds a third `finegrained`
+  variant (90 kB vs 229 kB for the snabbdom slots) with selector-identical
+  TodoMVC markup and a thin rAF loop standing in for the runtime seam.
+- oxlint rules `no-eager-bind-reads` and `bind-handlers-no-model-reads` in a
+  new `experimental` preset of `@foldkit/oxlint-plugin`.
+- DevTools time travel verified end-to-end on the bindView path: jumpTo
+  reconciles historical Models through the same DOM nodes, clicks during
+  pause are swallowed, resume restores live dispatch and exact live DOM, and
+  the store's allocated signal count stays flat across repeated history
+  sweeps.
 
 ## Remaining
 
-- Runtime seam: renderer switch in `makeApplication` / `makeElement`; render
-  loop tick becomes `reconcile` + `flush`; deepFreeze boundary decision (store
-  keeps a private unfrozen copy).
-- Scene integration: the materializer as Scene's render target; port
-  `toHaveHook` / `toHaveHandler` matchers.
-- html factory seam: express bindings through the existing `html<Message>()`
-  surface so apps do not import a parallel API; bindings subsume
-  `createLazy` / `createKeyedLazy` on the new path.
-- Control-flow ergonomics: keyed branch and list helpers consistent with the
-  keyed-view conventions in AGENTS.md.
-- Browser wall-clock truth: third slot `foldkit-<version>-finegrained` in
-  `internal/lustre-benchmark`; later a js-framework-benchmark keyed entry.
-- Slow instrumentation: Reconcile and Flush phases with thresholds.
-- oxlint rules: no eager Model reads in view bodies outside thunks; handlers
-  close over stable keys only.
-- DevTools: time travel through `reconcile(snapshot)`; pause semantics.
+- Collect browser wall-clock numbers by running the lustre-benchmark runbook
+  in Chrome across all three slots; later add a js-framework-benchmark keyed
+  entry.
+- Migration epic: unify authoring on the existing `html<Message>()` surface
+  (bindings subsume `createLazy` / `createKeyedLazy`), migrate the example
+  apps, then swap the lustre finegrained slot's hand-rolled loop to
+  `makeElement` with `bindView`.
 - Deletion of the snabbdom path once the exit fitness function is green across
   the example apps.
 
