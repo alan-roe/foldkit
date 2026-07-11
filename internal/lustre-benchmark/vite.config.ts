@@ -3,7 +3,26 @@ import { defineConfig } from 'vite'
 import { foldkitAliases } from '../../examples/vite.aliases'
 
 const variant = process.env['BUILD_VARIANT'] ?? 'naive'
-const isOptimised = variant === 'optimised'
+
+const resolveOutDir = (variant: string): string => {
+  if (variant === 'finegrained') {
+    return 'dist/finegrained'
+  }
+  if (variant === 'optimised') {
+    return 'dist/optimised'
+  }
+  return 'dist/naive'
+}
+
+const resolveEntryHtml = (variant: string): string => {
+  if (variant === 'finegrained') {
+    return 'index.finegrained.html'
+  }
+  if (variant === 'optimised') {
+    return 'index.optimised.html'
+  }
+  return 'index.html'
+}
 
 export default defineConfig({
   base: './',
@@ -11,12 +30,12 @@ export default defineConfig({
     alias: foldkitAliases(__dirname),
   },
   build: {
-    outDir: isOptimised ? 'dist/optimised' : 'dist/naive',
+    outDir: resolveOutDir(variant),
     target: 'es2022',
     minify: 'esbuild',
     sourcemap: false,
     rollupOptions: {
-      input: isOptimised ? 'index.optimised.html' : 'index.html',
+      input: resolveEntryHtml(variant),
       output: {
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',

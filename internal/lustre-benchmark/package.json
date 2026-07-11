@@ -4,9 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "build": "pnpm build:naive && pnpm build:optimised",
+    "build": "pnpm build:naive && pnpm build:optimised && pnpm build:finegrained",
     "build:naive": "vite build",
     "build:optimised": "BUILD_VARIANT=optimised vite build && mv dist/optimised/index.optimised.html dist/optimised/index.html",
+    "build:finegrained": "BUILD_VARIANT=finegrained vite build && mv dist/finegrained/index.finegrained.html dist/finegrained/index.html",
     "dev": "vite",
     "profile": "RUN_LUSTRE_PROFILE=1 vitest run",
     "typecheck": "tsc --noEmit"
