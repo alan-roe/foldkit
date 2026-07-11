@@ -1,5 +1,6 @@
 import { Plugin } from 'effect-oxlint'
 
+import { bindHandlersNoModelReads } from './rules/bind-handlers-no-model-reads.ts'
 import { commandBindingMatchesName } from './rules/command-binding-matches-name.ts'
 import { commandDefinePascalConst } from './rules/command-define-pascal-const.ts'
 import { gotPrefixRequiresSubmodelPayload } from './rules/got-prefix-requires-submodel-payload.ts'
@@ -13,6 +14,7 @@ import { noArrayIndexViewKeys } from './rules/no-array-index-view-keys.ts'
 import { noChildMessageConstructionInRoot } from './rules/no-child-message-construction-in-root.ts'
 import { noDisablingDevGuardrails } from './rules/no-disabling-dev-guardrails.ts'
 import { noDuplicateOnmountPerElement } from './rules/no-duplicate-onmount-per-element.ts'
+import { noEagerBindReads } from './rules/no-eager-bind-reads.ts'
 import { noEmptyObjectTaggedCall } from './rules/no-empty-object-tagged-call.ts'
 import { noHandRolledCommandStruct } from './rules/no-hand-rolled-command-struct.ts'
 import { noHardcodedRouteStrings } from './rules/no-hardcoded-route-strings.ts'
@@ -24,6 +26,42 @@ import { preferCallableMessageConstructor } from './rules/prefer-callable-messag
 import { requireRelForExternalLink } from './rules/require-rel-for-external-link.ts'
 import { selectionSubmodelFactoryAtModuleScope } from './rules/selection-submodel-factory-at-module-scope.ts'
 import { wrapChildOutputInGotMessage } from './rules/wrap-child-output-in-got-message.ts'
+
+const RECOMMENDED_RULE_NAMES = [
+  'command-binding-matches-name',
+  'command-define-pascal-const',
+  'got-prefix-requires-submodel-payload',
+  'got-submodel-message-name',
+  'got-wrapper-carries-only-routing',
+  'keyed-required-for-mapped-rows',
+  'lazy-view-stable-references',
+  'message-binding-matches-tag',
+  'mount-factory-must-use-element',
+  'no-array-index-view-keys',
+  'no-child-message-construction-in-root',
+  'no-disabling-dev-guardrails',
+  'no-duplicate-onmount-per-element',
+  'no-empty-object-tagged-call',
+  'no-hand-rolled-command-struct',
+  'no-hardcoded-route-strings',
+  'no-module-level-mutable-state',
+  'no-noop-message',
+  'no-raw-dom-event-attributes',
+  'no-spread-in-evo',
+  'prefer-callable-message-constructor',
+  'require-rel-for-external-link',
+  'selection-submodel-factory-at-module-scope',
+  'wrap-child-output-in-got-message',
+] as const
+
+// Rules for the experimental `foldkit/experimental` Bind view surface
+// (fine-grained bindings) are excluded from `recommended`. The Bind API
+// itself is experimental and most apps do not use it yet, so its rules
+// live only in `all` and in the dedicated `experimental` preset below.
+const EXPERIMENTAL_RULE_NAMES = [
+  'no-eager-bind-reads',
+  'bind-handlers-no-model-reads',
+] as const
 
 const basePlugin = Plugin.define({
   name: 'foldkit',
@@ -54,6 +92,11 @@ const basePlugin = Plugin.define({
     'selection-submodel-factory-at-module-scope':
       selectionSubmodelFactoryAtModuleScope,
     'wrap-child-output-in-got-message': wrapChildOutputInGotMessage,
+    'no-eager-bind-reads': noEagerBindReads,
+    'bind-handlers-no-model-reads': bindHandlersNoModelReads,
+  },
+  recommended: {
+    rules: RECOMMENDED_RULE_NAMES,
   },
 })
 
@@ -86,10 +129,26 @@ const withTestOverride = (config: Plugin.OxlintConfig): OverriddenConfig => ({
   ],
 })
 
+// Rules for the experimental `foldkit/experimental` Bind view surface,
+// spread alongside `recommended` by apps that opt into `bindView`. Kept
+// out of `recommended` and separate from `all` (which already carries
+// every registered rule, including these) so an app can adopt bind
+// discipline without pulling in the rest of `all`.
+const experimentalConfig: Plugin.OxlintConfig = {
+  jsPlugins: basePlugin.configs.all.jsPlugins,
+  rules: Object.fromEntries(
+    EXPERIMENTAL_RULE_NAMES.map((name): [string, Plugin.RuleSeverity] => [
+      `foldkit/${name}`,
+      'error',
+    ]),
+  ),
+}
+
 export default {
   ...basePlugin,
   configs: {
     recommended: withTestOverride(basePlugin.configs.recommended),
     all: withTestOverride(basePlugin.configs.all),
+    experimental: withTestOverride(experimentalConfig),
   },
 }

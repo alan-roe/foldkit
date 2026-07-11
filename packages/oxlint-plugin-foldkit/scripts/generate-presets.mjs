@@ -11,3 +11,4 @@ const write = (name, config) =>
 
 write('recommended.json', plugin.configs.recommended)
 write('all.json', plugin.configs.all)
+write('experimental.json', plugin.configs.experimental)

@@ -10,10 +10,11 @@
       "import": "./dist/index.js"
     },
     "./recommended.json": "./recommended.json",
-    "./all.json": "./all.json"
+    "./all.json": "./all.json",
+    "./experimental.json": "./experimental.json"
   },
   "scripts": {
-    "clean": "rimraf dist recommended.json all.json *.tsbuildinfo",
+    "clean": "rimraf dist recommended.json all.json experimental.json *.tsbuildinfo",
     "build": "pnpm run clean && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js && node scripts/generate-presets.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -32,7 +33,8 @@
   "files": [
     "dist",
     "recommended.json",
-    "all.json"
+    "all.json",
+    "experimental.json"
   ],
   "keywords": [
     "foldkit",
