@@ -10,7 +10,16 @@ import {
   runWithOwner,
 } from '../reactive/owner.js'
 import { type Signal, makeSignal } from '../reactive/signal.js'
-import type { Attr, Binding, Cond, El, List, On, Text } from './binding.js'
+import type {
+  Attr,
+  Binding,
+  Bound,
+  Cond,
+  El,
+  List,
+  On,
+  Text,
+} from './binding.js'
 
 // CONTEXT
 
@@ -79,16 +88,15 @@ const buildListener = <Model, Message>(
 
 // TEXT
 
-const buildText = <Model, Message>(
-  textBinding: Text<Model, Message>,
+/** Attaches the bound-text render effect to an existing text node - shared
+ *  by {@link buildText} (which also creates the node) and the template
+ *  path (which clones it instead). */
+const bindTextEffect = <Model, Message>(
+  node: globalThis.Text,
+  value: Bound<Model, string>,
   model: Model,
   ctx: Ctx<Message>,
-): globalThis.Text => {
-  const { value } = textBinding
-  if (typeof value !== 'function') {
-    return ctx.document.createTextNode(value)
-  }
-  const node = ctx.document.createTextNode('')
+): void => {
   let hasWritten = false
   let lastWritten = ''
   makeRenderEffect(() => {
@@ -101,6 +109,19 @@ const buildText = <Model, Message>(
     lastWritten = next
     node.data = next
   })
+}
+
+const buildText = <Model, Message>(
+  textBinding: Text<Model, Message>,
+  model: Model,
+  ctx: Ctx<Message>,
+): globalThis.Text => {
+  const { value } = textBinding
+  if (typeof value !== 'function') {
+    return ctx.document.createTextNode(value)
+  }
+  const node = ctx.document.createTextNode('')
+  bindTextEffect(node, value, model, ctx)
   return node
 }
 
@@ -185,6 +206,236 @@ const buildChildren = <Model, Message>(
   return topNodes
 }
 
+// TEMPLATE
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- List's Item is erased on the Binding union, mirroring binding.ts.
+type TemplateSite =
+  | Readonly<{ kind: 'text'; path: ReadonlyArray<number> }>
+  | Readonly<{ kind: 'attr'; path: ReadonlyArray<number>; attrIndex: number }>
+  | Readonly<{ kind: 'on'; path: ReadonlyArray<number>; attrIndex: number }>
+  | Readonly<{ kind: 'list'; path: ReadonlyArray<number> }>
+  | Readonly<{ kind: 'cond'; path: ReadonlyArray<number> }>
+
+type ElementTemplate = Readonly<{
+  root: Node
+  sites: ReadonlyArray<TemplateSite>
+}>
+
+/**
+ * Builds a template's static DOM skeleton once from a sample `El`/`Text`
+ * binding tree: static tags/attrs/text are written directly, exactly as
+ * `buildElement`/`buildText` would, but every bound attr/text/`On`, and
+ * every `List`/`Cond` child, records a `TemplateSite` instead of building
+ * live behaviour - `path` is the sequence of `children` indices from the
+ * root down to that site, which is *also* the sequence of DOM child steps
+ * to the corresponding cloned node (one DOM node is built per binding node
+ * here), so the same `path` locates both sides at instantiation time.
+ */
+const buildTemplateNode = <Model, Message>(
+  binding: El<Model, Message> | Text<Model, Message>,
+  ctx: Ctx<Message>,
+  path: ReadonlyArray<number>,
+  sites: Array<TemplateSite>,
+): Node => {
+  if (binding._tag === 'Text') {
+    const { value } = binding
+    if (typeof value === 'function') {
+      sites.push({ kind: 'text', path })
+      return ctx.document.createTextNode('')
+    }
+    return ctx.document.createTextNode(value)
+  }
+
+  const element = ctx.document.createElement(binding.tag)
+  binding.attrs.forEach((attrBinding, attrIndex) => {
+    if (attrBinding._tag === 'On') {
+      sites.push({ kind: 'on', path, attrIndex })
+      return
+    }
+    if (typeof attrBinding.value === 'function') {
+      sites.push({ kind: 'attr', path, attrIndex })
+      return
+    }
+    writeAttr(element, attrBinding.name, attrBinding.value)
+  })
+
+  binding.children.forEach((child, childIndex) => {
+    const childPath = [...path, childIndex]
+    if (child._tag === 'List' || child._tag === 'Cond') {
+      const anchor = ctx.document.createComment(child._tag)
+      element.appendChild(anchor)
+      sites.push(
+        child._tag === 'List'
+          ? { kind: 'list', path: childPath }
+          : { kind: 'cond', path: childPath },
+      )
+      return
+    }
+    element.appendChild(buildTemplateNode(child, ctx, childPath, sites))
+  })
+
+  return element
+}
+
+/** Walks `path` from `root` using only `firstChild`/`nextSibling` (never
+ *  `childNodes` indexing), the same technique the template was built with,
+ *  so a clone's site nodes are found without materializing a live
+ *  collection. */
+const resolveTemplatePath = (root: Node, path: ReadonlyArray<number>): Node => {
+  let node: Node = root
+  for (const step of path) {
+    let child = node.firstChild as Node
+    for (let hop = 0; hop < step; hop += 1) {
+      child = child.nextSibling as Node
+    }
+    node = child
+  }
+  return node
+}
+
+/** Extracts the sub-binding at `path` from a fresh binding tree of the
+ *  template's shape - see {@link buildTemplateNode} for why `path` means
+ *  the same thing on both sides. */
+const resolveBindingAt = <Model, Message>(
+  root: El<Model, Message> | Text<Model, Message>,
+  path: ReadonlyArray<number>,
+): Binding<Model, Message> => {
+  let node: Binding<Model, Message> = root
+  for (const step of path) {
+    node = (node as El<Model, Message>).children[step] as Binding<
+      Model,
+      Message
+    >
+  }
+  return node
+}
+
+/**
+ * Clones `template.root` and, at each recorded site, attaches the
+ * per-instance behaviour (bound-attr/text render effect, event listener,
+ * `List`/`Cond` reactive region) using the closures pulled from
+ * `rowBinding` - a freshly built binding tree of the same shape the
+ * template was sampled from (its own `itemSignal.read`/`toMessage`
+ * closures, never the sample's). Static nodes/attrs/text see no DOM write
+ * here: they arrived already correct via `cloneNode(true)`.
+ */
+const instantiateFromTemplate = <Model, Message>(
+  template: ElementTemplate,
+  rowBinding: El<Model, Message> | Text<Model, Message>,
+  model: Model,
+  ctx: Ctx<Message>,
+): Node => {
+  const root = template.root.cloneNode(true)
+  for (const site of template.sites) {
+    const target = resolveTemplatePath(root, site.path)
+    const binding = resolveBindingAt(rowBinding, site.path)
+    switch (site.kind) {
+      case 'text': {
+        bindTextEffect(
+          target as globalThis.Text,
+          (binding as Text<Model, Message>).value as Bound<Model, string>,
+          model,
+          ctx,
+        )
+        break
+      }
+      case 'attr': {
+        const attrBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as Attr<Model, Message>
+        buildAttr(target as Element, attrBinding, model, ctx)
+        break
+      }
+      case 'on': {
+        const onBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as On<Model, Message>
+        buildListener(target as Element, onBinding, ctx)
+        break
+      }
+      case 'list': {
+        setupList(
+          target.parentNode as Node & ParentNode,
+          target as Comment,
+          binding as List<Model, Message, any>,
+          model,
+          ctx,
+        )
+        break
+      }
+      case 'cond': {
+        setupCond(
+          target.parentNode as Node & ParentNode,
+          (target as Comment).nextSibling,
+          binding as Cond<Model, Message>,
+          model,
+          ctx,
+        )
+        break
+      }
+    }
+  }
+  return root
+}
+
+const rowTemplateCache = new WeakMap<
+  List<any, any, any>,
+  WeakMap<Document, ElementTemplate>
+>()
+
+/**
+ * Lazily builds and caches a `List`'s row template, keyed by the stable
+ * `List` binding object and `document`. Every row creation calls
+ * `renderItem` fresh (its closures are per-row `itemSignal.read`), so the
+ * cache cannot key off the row binding itself - `sample` (whichever row
+ * triggers the cache miss, always the first) only donates its *shape*,
+ * which every row shares since `renderItem` is deterministic.
+ */
+const getOrBuildRowTemplate = <Model, Message>(
+  listBinding: List<Model, Message, any>,
+  sample: El<Model, Message> | Text<Model, Message>,
+  ctx: Ctx<Message>,
+): ElementTemplate => {
+  const byDocument = rowTemplateCache.get(listBinding)
+  const cached = byDocument?.get(ctx.document)
+  if (cached !== undefined) {
+    return cached
+  }
+  const sites: Array<TemplateSite> = []
+  const root = buildTemplateNode(sample, ctx, [], sites)
+  const template: ElementTemplate = { root, sites }
+  const nextByDocument = byDocument ?? new WeakMap<Document, ElementTemplate>()
+  nextByDocument.set(ctx.document, template)
+  rowTemplateCache.set(listBinding, nextByDocument)
+  return template
+}
+
+/**
+ * Builds one list row's DOM and inserts it before `referenceNode`. A row
+ * rooted in `El`/`Text` (every `renderItem` in the shared TodoMVC
+ * fixtures) clones the cached template instead of recursing through
+ * `createElement`/`setAttribute` per node - static structure costs nothing
+ * after the first row. A row rooted in `List`/`Cond` itself has no static
+ * skeleton to cache and falls back to {@link buildChildren} (matching its
+ * documented out-of-scope-for-v0 case).
+ */
+const instantiateListRow = <Model, Message, Item>(
+  listBinding: List<Model, Message, Item>,
+  rowBinding: Binding<Model, Message>,
+  parent: Node & ParentNode,
+  referenceNode: Node | null,
+  model: Model,
+  ctx: Ctx<Message>,
+): ReadonlyArray<Node> => {
+  if (rowBinding._tag === 'List' || rowBinding._tag === 'Cond') {
+    return buildChildren(parent, [rowBinding], model, ctx, referenceNode)
+  }
+  const template = getOrBuildRowTemplate(listBinding, rowBinding, ctx)
+  const node = instantiateFromTemplate(template, rowBinding, model, ctx)
+  parent.insertBefore(node, referenceNode)
+  return [node]
+}
+
 // LIST
 
 type RowState<Item> = Readonly<{
@@ -202,7 +453,13 @@ type RowState<Item> = Readonly<{
  * each row's DOM only when it is not already immediately before the
  * position the walk expects, so an unchanged order performs zero DOM
  * writes and a full reorder moves existing nodes rather than recreating
- * them.
+ * them. New rows are built via {@link instantiateListRow}, which clones a
+ * cached per-`List` template rather than recursing through
+ * `createElement`/`setAttribute` for every node.
+ *
+ * NOTE: an empty next selection skips the keyed diff entirely - no
+ * `nextKeys` Set, no per-row lookup - since every row is being torn down
+ * regardless of key; this is the 1000 -> 0 "clear" transition.
  */
 const setupList = <Model, Message, Item>(
   parent: Node & ParentNode,
@@ -218,6 +475,20 @@ const setupList = <Model, Message, Item>(
     makeRenderEffect(() => {
       ctx.onThunkEvaluation?.()
       const items = listBinding.select(model)
+
+      if (items.length === 0) {
+        if (rows.size > 0) {
+          for (const row of rows.values()) {
+            disposeOwner(row.owner)
+            for (const node of row.nodes) {
+              parent.removeChild(node)
+            }
+          }
+          rows.clear()
+        }
+        return
+      }
+
       const nextKeys = new Set(items.map(listBinding.toKey))
 
       for (const [key, row] of rows) {
@@ -250,13 +521,15 @@ const setupList = <Model, Message, Item>(
 
         const itemSignal = makeSignal<Item>(item)
         const rowOwner = makeOwner(Option.some(listOwner))
+        const rowBinding = listBinding.renderItem(itemSignal.read)
         const nodes = runWithOwner(rowOwner, () =>
-          buildChildren(
+          instantiateListRow(
+            listBinding,
+            rowBinding,
             parent,
-            [listBinding.renderItem(itemSignal.read)],
+            expectedNext,
             model,
             ctx,
-            expectedNext,
           ),
         )
         rows.set(key, { itemSignal, owner: rowOwner, nodes })

@@ -5,7 +5,10 @@ import { Option } from 'effect'
 type OwnerRecord = {
   readonly id: number
   parent: OwnerRecord | undefined
-  readonly children: Array<OwnerRecord>
+  firstChild: OwnerRecord | undefined
+  lastChild: OwnerRecord | undefined
+  prevSibling: OwnerRecord | undefined
+  nextSibling: OwnerRecord | undefined
   readonly cleanups: Array<() => void>
   isDisposed: boolean
 }
@@ -17,6 +20,42 @@ export type Owner = OwnerRecord
 let nextOwnerId = 0
 let currentOwner: Owner | undefined
 
+// SIBLING LIST
+
+// Children are an intrusive doubly-linked sibling list rather than an
+// array: `attachChild`/`detachChild` are O(1) regardless of how many
+// siblings exist, so disposing many short-lived owners (e.g. list rows)
+// under one long-lived parent never degrades to O(n) per disposal. New
+// children are prepended, so `firstChild` is always the newest -
+// `disposeOwner` walking head-to-tail reproduces the prior newest-first
+// order.
+
+const attachChild = (parent: OwnerRecord, child: OwnerRecord): void => {
+  child.nextSibling = parent.firstChild
+  if (parent.firstChild !== undefined) {
+    parent.firstChild.prevSibling = child
+  }
+  parent.firstChild = child
+  if (parent.lastChild === undefined) {
+    parent.lastChild = child
+  }
+}
+
+const detachChild = (parent: OwnerRecord, child: OwnerRecord): void => {
+  if (child.prevSibling !== undefined) {
+    child.prevSibling.nextSibling = child.nextSibling
+  } else {
+    parent.firstChild = child.nextSibling
+  }
+  if (child.nextSibling !== undefined) {
+    child.nextSibling.prevSibling = child.prevSibling
+  } else {
+    parent.lastChild = child.prevSibling
+  }
+  child.prevSibling = undefined
+  child.nextSibling = undefined
+}
+
 /** Creates a new `Owner`, attached as a child of `maybeParent` when present.
  *  A parentless owner is a disposal root: nothing disposes it but an
  *  explicit `disposeOwner` call. */
@@ -26,12 +65,15 @@ export const makeOwner = (maybeParent: Option.Option<Owner>): Owner => {
   const owner: Owner = {
     id: nextOwnerId,
     parent,
-    children: [],
+    firstChild: undefined,
+    lastChild: undefined,
+    prevSibling: undefined,
+    nextSibling: undefined,
     cleanups: [],
     isDisposed: false,
   }
   if (parent !== undefined) {
-    parent.children.push(owner)
+    attachChild(parent, owner)
   }
   return owner
 }
@@ -71,11 +113,20 @@ export const disposeOwner = (owner: Owner): void => {
     return
   }
   owner.isDisposed = true
-  while (owner.children.length > 0) {
-    const child = owner.children.pop()
-    if (child !== undefined) {
-      disposeOwner(child)
-    }
+  let child = owner.firstChild
+  owner.firstChild = undefined
+  owner.lastChild = undefined
+  while (child !== undefined) {
+    const next = child.nextSibling
+    child.prevSibling = undefined
+    child.nextSibling = undefined
+    // The child's slot in `owner`'s list was already unlinked above (the
+    // whole list was cut loose in one step), so clear its parent pointer
+    // too: the recursive `disposeOwner` below then skips the now-redundant
+    // per-child `detachChild` at its own tail.
+    child.parent = undefined
+    disposeOwner(child)
+    child = next
   }
   while (owner.cleanups.length > 0) {
     const cleanup = owner.cleanups.pop()
@@ -85,10 +136,7 @@ export const disposeOwner = (owner: Owner): void => {
   }
   const parent = owner.parent
   if (parent !== undefined) {
-    const index = parent.children.indexOf(owner)
-    if (index !== -1) {
-      parent.children.splice(index, 1)
-    }
+    detachChild(parent, owner)
     owner.parent = undefined
   }
 }

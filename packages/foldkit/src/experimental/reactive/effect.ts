@@ -1,15 +1,39 @@
 import { onCleanup } from './owner.js'
 import type { SchedulableEffect } from './scheduler.js'
 
+// LINK
+
+/** One reactive edge between a `Signal` and a subscribing render effect.
+ *  Intrusively double-linked into both the signal's subscriber list
+ *  (`prevSub`/`nextSub`) and the effect's source list (`prevSource`/
+ *  `nextSource`): a single allocation per (signal, effect) dependency per
+ *  effect run, detached from both lists in O(1) with no search or hashing. */
+export type Link = {
+  readonly effect: TrackedObserver
+  readonly host: SubscriberHost
+  prevSource: Link | undefined
+  nextSource: Link | undefined
+  prevSub: Link | undefined
+  nextSub: Link | undefined
+}
+
+/** The subscriber-list head/tail a `Signal` exposes to the tracking
+ *  machinery. Every `Signal` owns exactly one of these; `linkSource`
+ *  appends, `clearSources` (via the effect side) detaches. */
+export type SubscriberHost = {
+  subsHead: Link | undefined
+  subsTail: Link | undefined
+}
+
 // OBSERVER
 
 /** The ambient tracking scope a signal read registers against: the running
- *  render effect. Exposes `addSource` so a signal can hand back its own
- *  unsubscribe closure, collected fresh on every effect run. */
-export type TrackedObserver = SchedulableEffect &
-  Readonly<{
-    addSource: (unsubscribeSource: () => void) => void
-  }>
+ *  render effect. Carries its own source-list head/tail so dependencies
+ *  collected on one run can be cleared in O(1) per edge on the next. */
+export type TrackedObserver = SchedulableEffect & {
+  sourcesHead: Link | undefined
+  sourcesTail: Link | undefined
+}
 
 let currentObserver: TrackedObserver | undefined
 let nextEffectId = 0
@@ -19,6 +43,66 @@ let nextEffectId = 0
  *  any render effect: reads are plain, untracked reads. */
 export const getCurrentObserver = (): TrackedObserver | undefined =>
   currentObserver
+
+/** Registers a dependency: appends a fresh `Link` to the tail of both
+ *  `observer`'s source list and `host`'s subscriber list. Called from
+ *  `signal.ts` on every tracked read; no de-duplication against repeat
+ *  reads of the same signal within one run - a harmless duplicate edge
+ *  that `clearSources` unlinks like any other on the next run. */
+export const linkSource = (
+  observer: TrackedObserver,
+  host: SubscriberHost,
+): void => {
+  const link: Link = {
+    effect: observer,
+    host,
+    prevSource: observer.sourcesTail,
+    nextSource: undefined,
+    prevSub: host.subsTail,
+    nextSub: undefined,
+  }
+  if (observer.sourcesTail !== undefined) {
+    observer.sourcesTail.nextSource = link
+  }
+  observer.sourcesTail = link
+  if (observer.sourcesHead === undefined) {
+    observer.sourcesHead = link
+  }
+  if (host.subsTail !== undefined) {
+    host.subsTail.nextSub = link
+  }
+  host.subsTail = link
+  if (host.subsHead === undefined) {
+    host.subsHead = link
+  }
+}
+
+const unlinkFromHost = (link: Link): void => {
+  const host = link.host
+  if (link.prevSub !== undefined) {
+    link.prevSub.nextSub = link.nextSub
+  } else {
+    host.subsHead = link.nextSub
+  }
+  if (link.nextSub !== undefined) {
+    link.nextSub.prevSub = link.prevSub
+  } else {
+    host.subsTail = link.prevSub
+  }
+}
+
+const clearSources = (observer: TrackedObserver): void => {
+  let link = observer.sourcesHead
+  while (link !== undefined) {
+    const next = link.nextSource
+    unlinkFromHost(link)
+    link.prevSource = undefined
+    link.nextSource = undefined
+    link = next
+  }
+  observer.sourcesHead = undefined
+  observer.sourcesTail = undefined
+}
 
 // RENDER EFFECT
 
@@ -36,17 +120,13 @@ export const getCurrentObserver = (): TrackedObserver | undefined =>
 export const makeRenderEffect = (run: () => void): void => {
   nextEffectId += 1
   const id = nextEffectId
-  let sources: Array<() => void> = []
   let isDisposed = false
 
   const execute = (): void => {
     if (isDisposed) {
       return
     }
-    for (const unsubscribeSource of sources) {
-      unsubscribeSource()
-    }
-    sources = []
+    clearSources(trackedEffect)
     const previousObserver = currentObserver
     currentObserver = trackedEffect
     try {
@@ -60,17 +140,13 @@ export const makeRenderEffect = (run: () => void): void => {
     id,
     isDisposed: () => isDisposed,
     run: execute,
-    addSource: unsubscribeSource => {
-      sources.push(unsubscribeSource)
-    },
+    sourcesHead: undefined,
+    sourcesTail: undefined,
   }
 
   onCleanup(() => {
     isDisposed = true
-    for (const unsubscribeSource of sources) {
-      unsubscribeSource()
-    }
-    sources = []
+    clearSources(trackedEffect)
   })
 
   execute()

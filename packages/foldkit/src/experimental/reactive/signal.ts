@@ -1,7 +1,11 @@
 import { Equal } from 'effect'
 
-import { getCurrentObserver } from './effect.js'
-import { type SchedulableEffect, markDirty } from './scheduler.js'
+import {
+  type SubscriberHost,
+  getCurrentObserver,
+  linkSource,
+} from './effect.js'
+import { markDirty } from './scheduler.js'
 
 // SIGNAL
 
@@ -29,13 +33,12 @@ export const makeSignal = <A>(
   equivalence: Equivalence<A> = Equal.equals,
 ): Signal<A> => {
   let value = initial
-  const subscribers = new Set<SchedulableEffect>()
+  const host: SubscriberHost = { subsHead: undefined, subsTail: undefined }
 
   const read = (): A => {
     const observer = getCurrentObserver()
-    if (observer !== undefined && !subscribers.has(observer)) {
-      subscribers.add(observer)
-      observer.addSource(() => subscribers.delete(observer))
+    if (observer !== undefined) {
+      linkSource(observer, host)
     }
     return value
   }
@@ -47,8 +50,10 @@ export const makeSignal = <A>(
       return
     }
     value = next
-    for (const subscriber of subscribers) {
-      markDirty(subscriber)
+    let link = host.subsHead
+    while (link !== undefined) {
+      markDirty(link.effect)
+      link = link.nextSub
     }
   }
 
