@@ -11,6 +11,12 @@ import {
 import { dual } from 'effect/Function'
 
 import type { CommandDefinition } from '../command/index.js'
+import type { Binding, Bound } from '../experimental/bind/binding.js'
+import type {
+  MaterializedElement,
+  MaterializedNode,
+} from '../experimental/bind/materialize.js'
+import { materializeKeyed } from '../experimental/bind/materialize.js'
 import type { File } from '../file/index.js'
 import type { FoldkitMountMarker } from '../html/index.js'
 import {
@@ -60,6 +66,7 @@ import {
 } from './internal.js'
 import type { Locator, LocatorAll } from './query.js'
 import {
+  BIND_ADAPTED_KEY,
   accessibleDescription,
   accessibleName,
   ancestorsOf,
@@ -201,6 +208,16 @@ const RESOLVED: MountStatus = { _tag: 'Resolved' }
 const ENDED_ACKNOWLEDGED: MountStatus = { _tag: 'Ended', acknowledged: true }
 const ENDED_UNACKNOWLEDGED: MountStatus = { _tag: 'Ended', acknowledged: false }
 
+/** How a Scene simulation renders its Model into the VNode tree the
+ *  locators/matchers/interactions walk. `View` calls a real `Html`/`Document`
+ *  view function through the html runtime, exactly as before. `BindView`
+ *  force-evaluates a `Binding` tree against the current Model (materialize
+ *  semantics, but with handlers wired to the simulation's capturing
+ *  dispatch) and adapts the result to the same VNode shape. */
+type RenderProgram<Model, Message> =
+  | Readonly<{ _tag: 'View'; view: (model: Model) => Html | Document }>
+  | Readonly<{ _tag: 'BindView'; binding: Binding<Model, Message> }>
+
 type InternalSceneSimulation<
   Model,
   Message,
@@ -214,7 +231,7 @@ type InternalSceneSimulation<
       message: Message,
     ) => UpdateResult<Model, OutMessage>
     resolvers: ReadonlyArray<ResolverEntry>
-    viewFn: (model: Model) => Html | Document
+    render: RenderProgram<Model, Message>
     capturingDispatch: CapturingDispatch
     scope: Option.Option<Locator>
     mountSlots: ReadonlyArray<MountSlotState>
@@ -429,6 +446,101 @@ const renderView = <Model>(
 
 const isDocument = (value: Html | Document): value is Document =>
   value !== null && 'body' in value
+
+// BINDVIEW ADAPTATION
+
+const CLASS_ATTR_PATTERN = /\s+/
+
+/** Splits a materialized `class` attribute (a space-separated string, as
+ *  `attr('class', ...)` produces) into the `Classes` map shape `data.class`
+ *  carries on a real snabbdom VNode. `query.ts`/`matchers.ts` read class
+ *  membership exclusively from `data.class`, never from `data.attrs.class`. */
+const splitClassAttr = (
+  attrs: Readonly<Record<string, string | boolean>>,
+): Readonly<{
+  attrs: Record<string, string | boolean>
+  classes: Record<string, boolean>
+}> => {
+  const rest: Record<string, string | boolean> = {}
+  let classes: Record<string, boolean> = {}
+  for (const [name, value] of Object.entries(attrs)) {
+    if (name === 'class' && typeof value === 'string') {
+      classes = Object.fromEntries(
+        value
+          .split(CLASS_ATTR_PATTERN)
+          .filter(String_.isNonEmpty)
+          .map(className => [className, true] as const),
+      )
+      continue
+    }
+    rest[name] = value
+  }
+  return { attrs: rest, classes }
+}
+
+const materializedNodeToVNodeChild = (
+  node: MaterializedNode,
+  dispatch: DispatchService,
+): VNode | string =>
+  node._tag === 'MaterializedText'
+    ? node.text
+    : materializedElementToVNode(node, dispatch)
+
+/** Adapts one materialized element into a VNode. Every `On` handler is
+ *  rewired from a bare `toMessage` thunk into a listener that dispatches
+ *  through `dispatch`, mirroring how the `html` factory's `OnClick`/`OnInput`
+ *  etc. close over the runtime dispatch at build time. `BIND_ADAPTED_KEY` is
+ *  stamped so matchers (`toHaveHook`) can recognize a bindView-adapted node. */
+const materializedElementToVNode = (
+  element: MaterializedElement,
+  dispatch: DispatchService,
+): VNode => {
+  const { attrs, classes } = splitClassAttr(element.attrs)
+  const on: Record<string, (event: Event) => void> = {}
+  for (const [eventName, toMessage] of Object.entries(element.handlers)) {
+    on[eventName] = (event: Event) => {
+      dispatch.dispatchSync(toMessage(event))
+    }
+  }
+  return {
+    sel: element.tag,
+    data: {
+      attrs,
+      class: classes,
+      on,
+      [BIND_ADAPTED_KEY]: true,
+    },
+    children: element.children.map(child =>
+      materializedNodeToVNodeChild(child, dispatch),
+    ),
+    elm: undefined,
+    text: undefined,
+    key: element.key,
+  }
+}
+
+/** Force-evaluates `binding` against `model` (materialize semantics,
+ *  including keyed list rows via `materializeKeyed`) and adapts the result
+ *  into the VNode shape Scene's locators/matchers/interaction steps already
+ *  walk. `On` handlers dispatch through `dispatch`, so click/type/submit
+ *  steps drive bindView programs exactly as they drive `Html` programs. */
+const renderBindView = <Model, Message>(
+  binding: Binding<Model, Message>,
+  model: Model,
+  dispatch: DispatchService,
+): VNode => {
+  const materialized = materializeKeyed(binding, model)
+  return materialized._tag === 'MaterializedText'
+    ? {
+        sel: undefined,
+        data: undefined,
+        children: undefined,
+        elm: undefined,
+        text: materialized.text,
+        key: undefined,
+      }
+    : materializedElementToVNode(materialized, dispatch)
+}
 
 // INTERACTION HELPERS
 
@@ -962,11 +1074,18 @@ const runSteps = <Model, Message, OutMessage>(
     const internal = toInternal(next)
 
     if ((internal.model as unknown) !== (UNINITIALIZED as unknown)) {
-      const html = renderView(
-        internal.viewFn,
-        internal.model,
-        internal.capturingDispatch.dispatch,
-      )
+      const html =
+        internal.render._tag === 'BindView'
+          ? renderBindView(
+              internal.render.binding,
+              internal.model,
+              internal.capturingDispatch.dispatch,
+            )
+          : renderView(
+              internal.render.view,
+              internal.model,
+              internal.capturingDispatch.dispatch,
+            )
       const mountSlots = reconcileMountSlots(internal.mountSlots, html)
       const mounts = pendingMountsOf(mountSlots)
       return { ...internal, html, mountSlots, mounts } as SceneSimulation<
@@ -1738,6 +1857,15 @@ const assertHasStyle = (
 
 const assertHasHook = (name: string): SceneAssertion =>
   assertOnElement(vnode => {
+    if (vnode.data?.[BIND_ADAPTED_KEY] === true) {
+      return {
+        pass: false,
+        actual:
+          'hooks do not exist on the fine-grained (bindView) render path - ' +
+          'bindView programs materialize a Binding tree directly, so there is ' +
+          'no snabbdom hook lifecycle to assert on; use toHaveHandler instead',
+      }
+    }
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
     const hooks = vnode.data?.hook as Record<string, unknown> | undefined
     return {
@@ -1968,7 +2096,33 @@ export const expectAll = (locatorAll: LocatorAll) => ({
 
 // SCENE
 
-/** Executes a scene test. Throws if any Commands remain unresolved. */
+/** A `bindView` config: either a `makeElement`-shape `Binding` directly, or
+ *  a `makeApplication`-shape `{ title, body }` (only `body` renders; Scene
+ *  has no title assertion). Mirrors the runtime's `bindView` field. */
+type BindViewProgram<Model, Message> =
+  | Binding<Model, Message>
+  | Readonly<{
+      title: string | Bound<Model, string>
+      body: Binding<Model, Message>
+    }>
+
+const isApplicationBindView = <Model, Message>(
+  program: BindViewProgram<Model, Message>,
+): program is Readonly<{
+  title: string | Bound<Model, string>
+  body: Binding<Model, Message>
+}> => Predicate.hasProperty(program, 'body')
+
+const bindingOfProgram = <Model, Message>(
+  program: BindViewProgram<Model, Message>,
+): Binding<Model, Message> =>
+  isApplicationBindView(program) ? program.body : program
+
+/** Executes a scene test. Throws if any Commands remain unresolved. Accepts
+ *  either a `view` (a real `Html`/`Document` view function, rendered through
+ *  the html runtime as before) or a `bindView` (a `Binding` tree,
+ *  force-evaluated against each step's Model and adapted to the same VNode
+ *  shape) - exactly one of the two must be provided. */
 export const scene: {
   <Model, Message, OutMessage>(
     config: Readonly<{
@@ -1990,13 +2144,50 @@ export const scene: {
     }>,
     ...steps: ReadonlyArray<SceneStep<Model, Message, undefined>>
   ): void
+  <Model, Message, OutMessage>(
+    config: Readonly<{
+      update: (
+        model: Model,
+        message: Message,
+      ) => readonly [Model, ReadonlyArray<AnyCommand>, OutMessage]
+      bindView: BindViewProgram<Model, Message>
+    }>,
+    ...steps: ReadonlyArray<SceneStep<Model, Message, OutMessage>>
+  ): void
+  <Model, Message>(
+    config: Readonly<{
+      update: (
+        model: Model,
+        message: Message,
+      ) => readonly [Model, ReadonlyArray<AnyCommand>]
+      bindView: BindViewProgram<Model, Message>
+    }>,
+    ...steps: ReadonlyArray<SceneStep<Model, Message, undefined>>
+  ): void
 } = <Model, Message, OutMessage = undefined>(
   config: Readonly<{
     update: (model: Model, message: Message) => UpdateResult<Model, OutMessage>
-    view: (model: Model) => Html | Document
+    view?: (model: Model) => Html | Document
+    bindView?: BindViewProgram<Model, Message>
   }>,
   ...steps: ReadonlyArray<SceneStep<Model, Message, OutMessage>>
 ): void => {
+  if (config.view === undefined && config.bindView === undefined) {
+    throw new Error(
+      'Scene.scene requires exactly one of `view` or `bindView`, but neither was provided.',
+    )
+  }
+  if (config.view !== undefined && config.bindView !== undefined) {
+    throw new Error(
+      'Scene.scene requires exactly one of `view` or `bindView`, but both were provided.',
+    )
+  }
+
+  const render: RenderProgram<Model, Message> =
+    config.bindView !== undefined
+      ? { _tag: 'BindView', binding: bindingOfProgram(config.bindView) }
+      : { _tag: 'View', view: config.view as (model: Model) => Html | Document }
+
   const capturingDispatch = createCapturingDispatch()
 
   /* eslint-disable @typescript-eslint/consistent-type-assertions */
@@ -2010,7 +2201,7 @@ export const scene: {
     updateFn: config.update,
     resolvers: [],
     html: undefined as unknown,
-    viewFn: config.view,
+    render,
     capturingDispatch,
     scope: Option.none(),
   } as unknown as SceneSimulation<Model, Message, OutMessage>

@@ -16,6 +16,12 @@ import { dual } from 'effect/Function'
 import { evo } from '../struct/index.js'
 import type { VNode } from '../vdom.js'
 
+/** Marker stamped on `VNodeData` for elements adapted from a `Binding` tree
+ *  (a Scene `bindView` program) rather than produced by a real `Html`
+ *  render. Lets matchers (`toHaveHook`) give bindView-specific guidance
+ *  without coupling `query.ts`/`matchers.ts` to `experimental/bind`. */
+export const BIND_ADAPTED_KEY = 'foldkitBindAdapted' as const
+
 // SELECTOR PARSING
 
 type MatchMode = 'Exact' | 'StartsWith'

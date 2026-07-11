@@ -14,12 +14,18 @@ export type MaterializedElement = Readonly<{
   attrs: Readonly<Record<string, string | boolean>>
   handlers: Readonly<Record<string, (event: Event) => unknown>>
   children: ReadonlyArray<MaterializedNode>
+  /** The row's `toKey(item)` result, present only on a `List` row's
+   *  materialized root when produced via {@link materializeKeyed}. Absent
+   *  from plain {@link materialize} output and from non-row nodes. */
+  key?: string
 }>
 
 /** A materialized text node: its `Bound` value already force-evaluated. */
 export type MaterializedText = Readonly<{
   _tag: 'MaterializedText'
   text: string
+  /** See {@link MaterializedElement.key}. */
+  key?: string
 }>
 
 /** The plain tree a `Binding` collapses to once every `Bound` is evaluated
@@ -67,22 +73,28 @@ const materializeAttrs = <Model, Message>(
 const materializeChild = <Model, Message>(
   binding: Binding<Model, Message>,
   model: Model,
+  attachKeys: boolean,
 ): ReadonlyArray<MaterializedNode> =>
   M.value(binding).pipe(
     M.tag('List', listBinding =>
-      listBinding.select(model).map(item =>
-        materializeNode(
+      listBinding.select(model).map(item => {
+        const node = materializeNode(
           listBinding.renderItem(() => item),
           model,
-        ),
-      ),
+          attachKeys,
+        )
+        return attachKeys ? { ...node, key: listBinding.toKey(item) } : node
+      }),
     ),
-    M.orElse(otherBinding => [materializeNode(otherBinding, model)]),
+    M.orElse(otherBinding => [
+      materializeNode(otherBinding, model, attachKeys),
+    ]),
   )
 
 const materializeNode = <Model, Message>(
   binding: Binding<Model, Message>,
   model: Model,
+  attachKeys: boolean,
 ): MaterializedNode =>
   M.value(binding).pipe(
     M.tagsExhaustive({
@@ -94,7 +106,7 @@ const materializeNode = <Model, Message>(
           attrs,
           handlers,
           children: elBinding.children.flatMap(child =>
-            materializeChild(child, model),
+            materializeChild(child, model, attachKeys),
           ),
         }
       },
@@ -106,6 +118,7 @@ const materializeNode = <Model, Message>(
         materializeNode(
           condBinding.renderBranch(condBinding.discriminant(model)),
           model,
+          attachKeys,
         ),
       // NOTE: a `List` only has a well-defined position when nested inside
       // an element's `children` - materializeChild expands it there. Passed
@@ -129,4 +142,16 @@ const materializeNode = <Model, Message>(
 export const materialize = <Model, Message>(
   binding: Binding<Model, Message>,
   model: Model,
-): MaterializedNode => materializeNode(binding, model)
+): MaterializedNode => materializeNode(binding, model, false)
+
+/**
+ * Like {@link materialize}, but also stamps each `List` row's materialized
+ * root with its `toKey(item)` result on a `key` field, so a consumer that
+ * needs keyed-list identity (Scene's bindView adapter) can carry it through
+ * to whatever shape it adapts the tree into. Non-row nodes never get a
+ * `key`. Pure, like `materialize`; not used by the live renderer.
+ */
+export const materializeKeyed = <Model, Message>(
+  binding: Binding<Model, Message>,
+  model: Model,
+): MaterializedNode => materializeNode(binding, model, true)

@@ -1,7 +1,7 @@
 import { Option, String as String_ } from 'effect'
 
 import type { VNode } from '../vdom.js'
-import { attr, textContent } from './query.js'
+import { BIND_ADAPTED_KEY, attr, textContent } from './query.js'
 
 type MatcherContext = Readonly<{ isNot: boolean }>
 
@@ -201,6 +201,17 @@ export const sceneMatchers = {
           `Expected element to have hook "${name}" but the element does not exist.`,
       }),
       onSome: vnode => {
+        if (vnode.data?.[BIND_ADAPTED_KEY] === true) {
+          return {
+            pass: false,
+            message: () =>
+              `Expected element to have hook "${name}" but hooks do not exist on the ` +
+              'fine-grained (bindView) render path. bindView programs materialize a ' +
+              'Binding tree directly, so there is no snabbdom hook lifecycle to assert ' +
+              'on. Use Scene.expect(locator).toHaveHandler(eventName) to assert on an ' +
+              'on() listener instead.',
+          }
+        }
         // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
         const hooks = vnode.data?.hook as Record<string, unknown> | undefined
         return {

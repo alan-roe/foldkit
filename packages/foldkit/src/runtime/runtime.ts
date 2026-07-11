@@ -33,6 +33,19 @@ import {
   createDevToolsStore,
 } from '../devTools/store.js'
 import { startWebSocketBridge } from '../devTools/webSocketBridge.js'
+import type { Binding, Bound } from '../experimental/bind/binding.js'
+import { type Mounted, mount } from '../experimental/bind/render.js'
+import { makeRenderEffect } from '../experimental/reactive/effect.js'
+import {
+  disposeOwner,
+  makeOwner,
+  runWithOwner,
+} from '../experimental/reactive/owner.js'
+import { flush } from '../experimental/reactive/scheduler.js'
+import {
+  type ModelStore,
+  makeModelStore,
+} from '../experimental/reactive/store.js'
 import {
   type BoundaryRegistry,
   Document,
@@ -216,6 +229,26 @@ export type SlowPatchContext<Model, Message> = Readonly<{
   thresholdMs: number
 }>
 
+/** Context provided when reconciling the fine-grained store exceeds its
+ *  configured time budget. Only fires on the `bindView` render path. */
+export type SlowReconcileContext<Model, Message> = Readonly<{
+  _tag: 'Reconcile'
+  model: Model
+  message: Option.Option<Message>
+  durationMs: number
+  thresholdMs: number
+}>
+
+/** Context provided when flushing dirty fine-grained render effects exceeds
+ *  its configured time budget. Only fires on the `bindView` render path. */
+export type SlowFlushContext<Model, Message> = Readonly<{
+  _tag: 'Flush'
+  model: Model
+  message: Option.Option<Message>
+  durationMs: number
+  thresholdMs: number
+}>
+
 /** Context provided when subscription dependency extraction exceeds its configured time budget. */
 export type SlowSubscriptionDependenciesContext<Model> = Readonly<{
   _tag: 'SubscriptionDependencies'
@@ -231,13 +264,19 @@ export type SlowContext<Model, Message> =
   | SlowUpdateContext<Model, Message>
   | SlowPatchContext<Model, Message>
   | SlowSubscriptionDependenciesContext<Model>
+  | SlowReconcileContext<Model, Message>
+  | SlowFlushContext<Model, Message>
 
-/** Phase names measured by the slow warning runtime option. */
+/** Phase names measured by the slow warning runtime option. `'Reconcile'`
+ *  and `'Flush'` only fire on the `bindView` render path; `'View'` and
+ *  `'Patch'` only fire on the `view` (snabbdom) render path. */
 export const SlowPhase = Schema.Literals([
   'Update',
   'View',
   'Patch',
   'SubscriptionDependencies',
+  'Reconcile',
+  'Flush',
 ])
 export type SlowPhase = typeof SlowPhase.Type
 
@@ -247,6 +286,8 @@ export type SlowThresholdOverrides = Readonly<{
   View?: number
   Patch?: number
   SubscriptionDependencies?: number
+  Reconcile?: number
+  Flush?: number
 }>
 
 type ResolvedSlowPhaseConfig<Context> = Readonly<{
@@ -264,6 +305,12 @@ type ResolvedSlowConfig<Model, Message> = Readonly<{
   >
   subscriptionDependencies: Option.Option<
     ResolvedSlowPhaseConfig<SlowSubscriptionDependenciesContext<Model>>
+  >
+  reconcile: Option.Option<
+    ResolvedSlowPhaseConfig<SlowReconcileContext<Model, Message>>
+  >
+  flush: Option.Option<
+    ResolvedSlowPhaseConfig<SlowFlushContext<Model, Message>>
   >
 }>
 
@@ -293,12 +340,16 @@ const DEFAULT_SLOW_VIEW_THRESHOLD_MS = 16
 const DEFAULT_SLOW_UPDATE_THRESHOLD_MS = 4
 const DEFAULT_SLOW_PATCH_THRESHOLD_MS = 8
 const DEFAULT_SLOW_SUBSCRIPTION_DEPENDENCIES_THRESHOLD_MS = 2
+const DEFAULT_SLOW_RECONCILE_THRESHOLD_MS = 4
+const DEFAULT_SLOW_FLUSH_THRESHOLD_MS = 8
 
 const ALL_SLOW_PHASES: ReadonlyArray<SlowPhase> = [
   'Update',
   'View',
   'Patch',
   'SubscriptionDependencies',
+  'Reconcile',
+  'Flush',
 ]
 
 const resolveSlowPhase = <Context>(
@@ -358,6 +409,17 @@ export const __resolveSlowConfig = <Model, Message>(
           isPhaseMeasured('SubscriptionDependencies'),
           config.thresholdOverrides?.SubscriptionDependencies ??
             DEFAULT_SLOW_SUBSCRIPTION_DEPENDENCIES_THRESHOLD_MS,
+          onSlow,
+        ),
+        reconcile: resolveSlowPhase(
+          isPhaseMeasured('Reconcile'),
+          config.thresholdOverrides?.Reconcile ??
+            DEFAULT_SLOW_RECONCILE_THRESHOLD_MS,
+          onSlow,
+        ),
+        flush: resolveSlowPhase(
+          isPhaseMeasured('Flush'),
+          config.thresholdOverrides?.Flush ?? DEFAULT_SLOW_FLUSH_THRESHOLD_MS,
           onSlow,
         ),
       }
@@ -433,6 +495,10 @@ export const defaultSlowCallback = (
         `Slow patch: ${duration}ms (budget: ${budget}ms), triggered by ${optionMessageTrigger(message)}. Key mapped lists by stable ids, split large views, or memoize stable subtrees with createLazy.`,
       SubscriptionDependencies: ({ subscriptionKey }) =>
         `Slow subscription dependencies: ${duration}ms (budget: ${budget}ms) for subscription "${subscriptionKey}". Keep modelToDependencies a cheap projection from modeled fields; avoid scans, sorting, serialization, and large dependency objects.`,
+      Reconcile: ({ message }) =>
+        `Slow reconcile: ${duration}ms (budget: ${budget}ms), triggered by ${optionMessageTrigger(message)}. Reconcile scales with how much of the Model changed; keep reads narrow (thunk positions only) and key mapped lists by stable ids.`,
+      Flush: ({ message }) =>
+        `Slow flush: ${duration}ms (budget: ${budget}ms), triggered by ${optionMessageTrigger(message)}. Flush runs every dirty render effect; avoid expensive work inside thunk bodies and split large dynamic subtrees.`,
     }),
   )
 
@@ -443,6 +509,8 @@ export const defaultSlowCallback = (
       View: ({ message }) => message,
       Patch: ({ message }) => message,
       SubscriptionDependencies: () => Option.none(),
+      Reconcile: ({ message }) => message,
+      Flush: ({ message }) => message,
     }),
   )
 
@@ -601,7 +669,20 @@ type RuntimeConfig<
     Model,
     ReadonlyArray<Command<Message, never, Resources | ManagedResourceServices>>,
   ]
-  view: (model: Model) => Document
+  view?: (model: Model) => Document
+  /**
+   * Fine-grained render path (experimental). When present, the runtime
+   * mounts `bindView.body` via the reactive store/renderer instead of
+   * calling `view`, and `bindView.title` gets its own render effect that
+   * writes `document.title` on change when it is a `Bound` thunk (a plain
+   * string is applied once). Exactly one of `view` / `bindView` is
+   * required; `makeApplication`/`makeElement` validate this before
+   * constructing the runtime.
+   */
+  bindView?: Readonly<{
+    title: string | Bound<Model, string>
+    body: Binding<Model, Message>
+  }>
   /**
    * Whether the runtime owns document-level state. When `true`, each render
    * applies the view's `title`, `canonical`, and `og:url` to the document
@@ -687,6 +768,20 @@ type RuntimeConfig<
   devTools?: DevToolsConfig
 }>
 
+/** Either a `view` returning a `Document`, or a `bindView` fine-grained
+ *  binding tree (experimental). Exactly one is required; providing both or
+ *  neither is a type error here, and the runtime also validates it at
+ *  startup for callers that bypass the type system. */
+export type ApplicationViewFields<Model, Message> =
+  | Readonly<{ view: (model: Model) => Document; bindView?: undefined }>
+  | Readonly<{
+      view?: undefined
+      bindView: Readonly<{
+        title: string | Bound<Model, string>
+        body: Binding<Model, Message>
+      }>
+    }>
+
 type BaseApplicationConfig<
   Model,
   Message,
@@ -702,7 +797,6 @@ type BaseApplicationConfig<
     Model,
     ReadonlyArray<Command<Message, never, Resources | ManagedResourceServices>>,
   ]
-  view: (model: Model) => Document
   subscriptions?: Subscriptions<
     Model,
     Message,
@@ -717,7 +811,8 @@ type BaseApplicationConfig<
   resources?: Layer.Layer<Resources>
   managedResources?: ManagedResources<Model, Message, ManagedResourceServices>
   devTools?: DevToolsConfig
-}>
+}> &
+  ApplicationViewFields<Model, Message>
 
 /** Configuration for `makeApplication` with flags and URL routing. */
 export type RoutingApplicationConfigWithFlags<
@@ -834,6 +929,14 @@ export type ElementCrashConfig<Model, Message> = Readonly<{
   report?: (context: CrashContext<Model, Message>) => void
 }>
 
+/** Either a `view` returning `Html`, or a `bindView` fine-grained binding
+ *  tree (experimental). Exactly one is required; providing both or neither
+ *  is a type error here, and the runtime also validates it at startup for
+ *  callers that bypass the type system. */
+export type ElementViewFields<Model, Message> =
+  | Readonly<{ view: (model: Model) => Html; bindView?: undefined }>
+  | Readonly<{ view?: undefined; bindView: Binding<Model, Message> }>
+
 type BaseElementConfig<
   Model,
   Message,
@@ -849,7 +952,6 @@ type BaseElementConfig<
     Model,
     ReadonlyArray<Command<Message, never, Resources | ManagedResourceServices>>,
   ]
-  view: (model: Model) => Html
   subscriptions?: Subscriptions<
     Model,
     Message,
@@ -863,7 +965,8 @@ type BaseElementConfig<
   resources?: Layer.Layer<Resources>
   managedResources?: ManagedResources<Model, Message, ManagedResourceServices>
   devTools?: DevToolsConfig
-}>
+}> &
+  ElementViewFields<Model, Message>
 
 /** Configuration for `makeElement` with flags. */
 export type ElementConfigWithFlags<
@@ -1265,6 +1368,7 @@ const makeRuntime = <
   init,
   update,
   view,
+  bindView,
   manageDocument,
   subscriptions,
   container,
@@ -1302,6 +1406,14 @@ const makeRuntime = <
   const resolvedSlowSubscriptionDependencies = Option.flatMap(
     resolvedSlow,
     ({ subscriptionDependencies }) => subscriptionDependencies,
+  )
+  const resolvedSlowReconcile = Option.flatMap(
+    resolvedSlow,
+    ({ reconcile }) => reconcile,
+  )
+  const resolvedSlowFlush = Option.flatMap(
+    resolvedSlow,
+    ({ flush: flushConfig }) => flushConfig,
   )
 
   const isFreezeModelActive = freezeModel !== false && !!import.meta.hot
@@ -1806,6 +1918,47 @@ const makeRuntime = <
 
         const dispatch = { dispatchAsync, dispatchSync }
 
+        // NOTE: fine-grained (`bindView`) render state. `bindViewRuntime`
+        // stays `None` on the snabbdom path and before the first bindView
+        // render. `dispatchTargetRef` is the swappable indirection `mount`
+        // dispatches through: `render` repoints `.current` to whichever
+        // `dispatchService` it was called with (live dispatch, or
+        // `noOpDispatch` during a DevTools jumpTo/pause replay), so pausing
+        // never needs to re-mount - it just swaps the target and
+        // reconciles. `disposeTitleEffect` tears down the bound-title
+        // render effect, which lives in its own `Owner` outside `mounted`
+        // since it targets `document.title`, not `container`.
+        let bindViewRuntime: Option.Option<
+          Readonly<{
+            store: ModelStore<Model & object>
+            mounted: Mounted
+          }>
+        > = Option.none()
+        let disposeTitleEffect: (() => void) | undefined
+
+        const dispatchTargetRef: { current: (message: unknown) => void } = {
+          current: dispatch.dispatchSync,
+        }
+        const swappableDispatch = (message: Message): void => {
+          dispatchTargetRef.current(message)
+        }
+
+        yield* Effect.addFinalizer(exit =>
+          Effect.sync(() => {
+            if (!Exit.hasInterrupts(exit)) {
+              return
+            }
+            disposeTitleEffect?.()
+            Option.match(bindViewRuntime, {
+              onNone: () => undefined,
+              onSome: ({ store, mounted }) => {
+                mounted.dispose()
+                store.dispose()
+              },
+            })
+          }),
+        )
+
         const isRenderPendingRef = yield* SubscriptionRef.make(false)
         const maybeLastDirtyMessageRef = yield* Ref.make<
           Option.Option<Message>
@@ -1951,6 +2104,91 @@ const makeRuntime = <
             if (renderMode === 'Replay') {
               beginReplayHtmlRender()
             }
+
+            if (Predicate.isNotUndefined(bindView)) {
+              // NOTE: fine-grained render path (branch by abstraction over
+              // the snabbdom path below). The dispatch swap runs on every
+              // call regardless of `renderMode`, so a DevTools jumpTo
+              // (`dispatchService` = `noOpDispatch`) and the following
+              // live render on resume (`dispatchService` = the default
+              // live `dispatch`) each repoint `dispatchTargetRef` before
+              // reconciling - no separate pause-specific branch to keep in
+              // sync with this one.
+              dispatchTargetRef.current = dispatchService.dispatchSync
+
+              if (Option.isNone(bindViewRuntime)) {
+                /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+                const store = makeModelStore(model as Model & object)
+                const mounted = mount({
+                  binding: bindView.body,
+                  view: store.view,
+                  dispatch: swappableDispatch,
+                  container,
+                  document: window.document,
+                })
+                bindViewRuntime = Option.some({ store, mounted })
+
+                if (manageDocument) {
+                  if (typeof bindView.title === 'string') {
+                    document.title = bindView.title
+                  } else {
+                    const titleBound = bindView.title
+                    const titleOwner = makeOwner(Option.none())
+                    runWithOwner(titleOwner, () => {
+                      makeRenderEffect(() => {
+                        document.title = titleBound(store.view)
+                      })
+                    })
+                    disposeTitleEffect = () => disposeOwner(titleOwner)
+                  }
+                }
+              } else {
+                const { store } = bindViewRuntime.value
+                const maybeLiveSlowReconcile = Option.flatMap(
+                  maybeLiveRender,
+                  () => resolvedSlowReconcile,
+                )
+                const maybeLiveSlowFlush = Option.flatMap(
+                  maybeLiveRender,
+                  () => resolvedSlowFlush,
+                )
+
+                const [, maybeReconcileDuration] = yield* Effect.sync(() =>
+                  measureSlowPhase(maybeLiveSlowReconcile, () => {
+                    /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+                    store.reconcile(model as Model & object)
+                  }),
+                )
+                reportSlowPhase<SlowReconcileContext<Model, Message>>(
+                  maybeLiveSlowReconcile,
+                  maybeReconcileDuration,
+                  (durationMs, thresholdMs) => ({
+                    _tag: 'Reconcile',
+                    model,
+                    message,
+                    durationMs,
+                    thresholdMs,
+                  }),
+                )
+
+                const [, maybeFlushDuration] = yield* Effect.sync(() =>
+                  measureSlowPhase(maybeLiveSlowFlush, flush),
+                )
+                reportSlowPhase<SlowFlushContext<Model, Message>>(
+                  maybeLiveSlowFlush,
+                  maybeFlushDuration,
+                  (durationMs, thresholdMs) => ({
+                    _tag: 'Flush',
+                    model,
+                    message,
+                    durationMs,
+                    thresholdMs,
+                  }),
+                )
+              }
+              return
+            }
+
             const maybeLiveSlowView = Option.flatMap(
               maybeLiveRender,
               () => resolvedSlowView,
@@ -1970,7 +2208,7 @@ const makeRuntime = <
                 )
 
                 try {
-                  return view(model)
+                  return view!(model)
                 } finally {
                   clearHtmlRuntime()
                 }
@@ -2763,6 +3001,8 @@ export function makeApplication<
     )
   }
 
+  requireExactlyOneView(config, 'makeApplication')
+
   const hasRouting = 'routing' in config
   const hasFlags = 'Flags' in config
 
@@ -2774,6 +3014,7 @@ export function makeApplication<
     Model: config.Model,
     update: config.update,
     view: config.view,
+    ...(config.bindView && { bindView: config.bindView }),
     manageDocument: true,
     ports: config.ports,
     ...(config.subscriptions && { subscriptions: config.subscriptions }),
@@ -2893,6 +3134,25 @@ export function makeApplication<
   /* eslint-enable @typescript-eslint/consistent-type-assertions */
 }
 
+/** Runtime backstop for the `view`/`bindView` exclusive-or: the type-level
+ *  union already rejects both-or-neither for typed callers, but this also
+ *  catches plain-JS callers and configs assembled dynamically. */
+const requireExactlyOneView = (
+  config: Readonly<{ view?: unknown; bindView?: unknown }>,
+  functionName: string,
+): void => {
+  const hasView = Predicate.isNotUndefined(config.view)
+  const hasBindView = Predicate.isNotUndefined(config.bindView)
+  if (hasView === hasBindView) {
+    throw new Error(
+      `[foldkit] ${functionName} needs exactly one of \`view\` or ` +
+        '`bindView` (both were provided, or neither was). `bindView` is ' +
+        'the experimental fine-grained render path; most apps should use ' +
+        '`view`.',
+    )
+  }
+}
+
 const toCrashConfig = <Model, Message>(
   crash: ElementCrashConfig<Model, Message> | undefined,
 ): CrashConfig<Model, Message> | undefined => {
@@ -2984,20 +3244,27 @@ export function makeElement<
     )
   }
 
+  requireExactlyOneView(config, 'makeElement')
+
   const hasFlags = 'Flags' in config
 
   const elementView = config.view
-  const view = (model: Model): Document => ({
-    title: '',
-    body: elementView(model),
-  })
+  const view = Predicate.isNotUndefined(elementView)
+    ? (model: Model): Document => ({ title: '', body: elementView(model) })
+    : undefined
+
+  const elementBindView = config.bindView
+  const bindView = Predicate.isNotUndefined(elementBindView)
+    ? { title: '', body: elementBindView }
+    : undefined
 
   const crash = toCrashConfig(config.crash)
 
   const baseConfig = {
     Model: config.Model,
     update: config.update,
-    view,
+    ...(Predicate.isNotUndefined(view) && { view }),
+    ...(Predicate.isNotUndefined(bindView) && { bindView }),
     manageDocument: false,
     ports: config.ports,
     ...(config.subscriptions && { subscriptions: config.subscriptions }),
