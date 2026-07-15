@@ -1,7 +1,7 @@
 import { Runtime } from 'foldkit'
 
-import { Model, init, update } from './main.js'
 import { bindView } from './main.finegrained.js'
+import { Model, init, update } from './main.js'
 
 // Fine-grained-rendering entry point for the lustre-benchmark TodoMVC slot.
 // `bindView` mounts through `Runtime.makeElement`'s fine-grained render

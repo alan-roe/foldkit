@@ -22,7 +22,7 @@ import {
 } from './main.js'
 
 type Binding<Model, Message> = Bind.Binding<Model, Message>
-const { attr, cond, el, list, on, onMount, text } = Bind
+const { attr, cond, el, list, on, onMount, prop, text } = Bind
 
 // VIEW
 //
@@ -157,7 +157,7 @@ const headerBinding: Binding<Model, Message> = el<Model, Message>(
         attr<Model, Message>('placeholder', 'What needs to be done?'),
         attr<Model, Message>('autofocus', true),
         attr<Model, Message>('name', 'newTodo'),
-        attr<Model, Message>('value', (model: Model) => model.newTodoText),
+        prop<Model, Message>('value', (model: Model) => model.newTodoText),
         on<Model, Message>('input', (event: Event) =>
           UpdatedNewTodo({ text: (event.target as HTMLInputElement).value }),
         ),
@@ -183,7 +183,7 @@ const renderViewRow = (readTodo: () => Todo): Binding<Model, Message> =>
         [
           attr<Model, Message>('class', 'toggle'),
           attr<Model, Message>('type', 'checkbox'),
-          attr<Model, Message>('checked', () => readTodo().completed),
+          prop<Model, Message>('checked', () => readTodo().completed),
           on<Model, Message>('click', () => ToggledTodo({ id: readTodo().id })),
         ],
         [],
@@ -213,7 +213,7 @@ const renderEditingRow = (readTodo: () => Todo): Binding<Model, Message> =>
     'input',
     [
       attr<Model, Message>('class', 'edit'),
-      attr<Model, Message>('value', editingTextFor),
+      prop<Model, Message>('value', editingTextFor),
       attr<Model, Message>('name', 'title'),
       attr<Model, Message>('id', `todo-${readTodo().id}`),
       attr<Model, Message>('autofocus', true),
@@ -259,7 +259,7 @@ const mainSectionBinding: Binding<Model, Message> = el<Model, Message>(
         attr<Model, Message>('class', 'toggle-all'),
         attr<Model, Message>('type', 'checkbox'),
         attr<Model, Message>('name', 'toggle'),
-        attr<Model, Message>('checked', isAllCompleted),
+        prop<Model, Message>('checked', isAllCompleted),
         on<Model, Message>('click', () => ToggledAll()),
       ],
       [],

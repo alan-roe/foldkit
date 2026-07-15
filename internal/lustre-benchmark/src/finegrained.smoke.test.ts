@@ -19,6 +19,7 @@ afterEach(async () => {
 describe('main.finegrained bindView', () => {
   it('boots via Runtime.makeElement and renders a row after Enter-submitting a new todo', async () => {
     container = document.createElement('div')
+    container.id = 'bench-root'
     document.body.appendChild(container)
 
     const application = Runtime.makeElement({
@@ -41,19 +42,23 @@ describe('main.finegrained bindView', () => {
 
     newTodoInput.value = 'buy milk'
     newTodoInput.dispatchEvent(new Event('input', { bubbles: true }))
-    newTodoInput.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-    )
 
+    // NOTE: the Enter dispatch is retried inside waitFor because the
+    // `onMount` keydown listener attaches when the Mount action's fiber
+    // starts, which is asynchronous relative to first render (og's
+    // snabbdom OnMount hook has the same characteristic). A retried Enter
+    // after the first successful add is a no-op: `AddedTodo` guards
+    // empty/whitespace `newTodoText`, which resets on the first add.
     await vi.waitFor(() => {
+      newTodoInput.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      )
       expect(container.querySelectorAll('.todo-list li')).toHaveLength(1)
     })
     expect(container.querySelector('.todo-list li label')?.textContent).toBe(
       'buy milk',
     )
-    expect(container.querySelector('.todo-count strong')?.textContent).toBe(
-      '1',
-    )
+    expect(container.querySelector('.todo-count strong')?.textContent).toBe('1')
     expect(newTodoInput.value).toBe('')
   })
 })
