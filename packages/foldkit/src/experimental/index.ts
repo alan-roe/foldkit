@@ -1,3 +1,5 @@
 export * as Bind from './bind/index.js'
 export * as Machine from './machine/index.js'
 export { derived } from './reactive/derived.js'
+export { html } from './html/index.js'
+export type { Child, HtmlFactory, Value } from './html/index.js'

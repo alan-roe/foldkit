@@ -1,0 +1,5 @@
+---
+'foldkit': minor
+---
+
+Retarget the `html` factory onto the fine-grained render path. `foldkit/experimental` now exports `html<Model, Message>()` with the og authoring surface - same name, same attrs-array/children-array call shapes, same PascalCase tag and attribute vocabulary - emitting Binding data instead of snabbdom VNodes. Attribute values accept `A | Bound<Model, A>`; children accept strings, thunks as text holes, and `null`; structural helpers (`list`, `cond`, `when`, compile-time-exhaustive `matchTag`, `submodel`, `empty`) are factory members; message-style event constructors additionally accept a dispatch-time thunk (`OnClick(() => Message)`). `h.keyed` and the `Key` attribute do not port: `list`/`cond` key by construction. Live DOM state (`Value`/`Checked`/`Selected`/`Open`/`Muted`) writes properties, mirroring og's postpatch-props semantics. The binding IR gains internal `OnDispatch` (conditional/async event dispatch) and `Prop` (DOM property write) variants to carry the og vocabulary faithfully.

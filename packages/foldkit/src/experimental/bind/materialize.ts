@@ -12,6 +12,10 @@ export type MaterializedElement = Readonly<{
   _tag: 'MaterializedElement'
   tag: string
   attrs: Readonly<Record<string, string | boolean>>
+  /** Every `Prop` collected on this element, force-evaluated against
+   *  `model` - the property-write counterpart of `attrs`, inert display
+   *  data. Absent when the element carries no `Prop` bindings. */
+  props?: Readonly<Record<string, unknown>>
   handlers: Readonly<Record<string, (event: Event) => unknown>>
   children: ReadonlyArray<MaterializedNode>
   /** The row's `toKey(item)` result, present only on a `List` row's
@@ -65,6 +69,7 @@ const materializeAttrs = <Model, Message>(
   wrap: (message: unknown) => unknown,
 ): Readonly<{
   attrs: Record<string, string | boolean>
+  props: Record<string, unknown>
   handlers: Record<string, (event: Event) => unknown>
   mounts: ReadonlyArray<
     Readonly<{ name: string; args?: Readonly<Record<string, unknown>> }>
@@ -72,6 +77,7 @@ const materializeAttrs = <Model, Message>(
   unmounts: ReadonlyArray<Readonly<{ message: unknown }>>
 }> => {
   const attrs: Record<string, string | boolean> = {}
+  const props: Record<string, unknown> = {}
   const handlers: Record<string, (event: Event) => unknown> = {}
   const mounts: Array<
     Readonly<{ name: string; args?: Readonly<Record<string, unknown>> }>
@@ -83,9 +89,21 @@ const materializeAttrs = <Model, Message>(
         Attr: attrValue => {
           attrs[attrValue.name] = resolveBound(model, attrValue.value)
         },
+        Prop: propValue => {
+          props[propValue.name] = resolveBound(model, propValue.value)
+        },
         On: onValue => {
           handlers[onValue.event] = (event: Event) =>
             wrap(onValue.toMessage(event))
+        },
+        OnDispatch: onDispatchValue => {
+          handlers[onDispatchValue.event] = (event: Event) => {
+            let out: unknown
+            onDispatchValue.handle(event, message => {
+              out = wrap(message)
+            })
+            return out
+          }
         },
         Mount: mountValue => {
           mounts.push(
@@ -100,7 +118,7 @@ const materializeAttrs = <Model, Message>(
       }),
     )
   }
-  return { attrs, handlers, mounts, unmounts }
+  return { attrs, props, handlers, mounts, unmounts }
 }
 
 /**
@@ -154,7 +172,7 @@ const materializeNode = <Model, Message>(
   M.value(binding).pipe(
     M.tagsExhaustive({
       El: (elBinding): MaterializedNode => {
-        const { attrs, handlers, mounts, unmounts } = materializeAttrs(
+        const { attrs, props, handlers, mounts, unmounts } = materializeAttrs(
           model,
           elBinding.attrs,
           wrap,
@@ -167,6 +185,7 @@ const materializeNode = <Model, Message>(
           children: elBinding.children.flatMap(child =>
             materializeChild(child, model, attachKeys, wrap, outerWrap),
           ),
+          ...(Object.keys(props).length > 0 ? { props } : {}),
           ...(mounts.length > 0 ? { mounts } : {}),
           ...(unmounts.length > 0 ? { unmounts } : {}),
         }

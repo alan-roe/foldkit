@@ -50,6 +50,23 @@ export type On<_Model, Message> = Readonly<{
   toMessage: (event: Event) => Message
 }>
 
+/**
+ * A DOM event listener whose dispatch is conditional, asynchronous, or
+ * both. `handle` receives the raw event and the composed `dispatch`
+ * function, and decides for itself whether/when/how many times to call
+ * it - unlike {@link On}, which always dispatches exactly one Message per
+ * event, synchronously. Reserved for the og event members whose semantics
+ * cannot be expressed as "always return a Message": `Option`-returning
+ * handlers (dispatch only on `Some`), `instanceof`-guarded custom events,
+ * and drag-zone-tracked enter/leave. Not part of the public factory
+ * surface - `events.ts` closes over it internally.
+ */
+export type OnDispatch<_Model, Message> = Readonly<{
+  _tag: 'OnDispatch'
+  event: string
+  handle: (event: Event, dispatch: (message: Message) => void) => void
+}>
+
 /** An attribute-position binding that starts an Effect fiber when the
  *  element mounts, dispatching each Message the action's Stream emits.
  *  Interrupted on unmount. `MountAction`'s exact shape lives in
@@ -69,13 +86,27 @@ export type UnmountAttr<_Model, Message> = Readonly<{
   message: Message
 }>
 
-/** A binding attached to an element: a static/bound attribute, an event
- *  listener, or a mount/unmount lifecycle hook. */
+/**
+ * An arbitrary DOM property write, either a static literal or bound to
+ * `Model` - the escape hatch for property-only state (`element.scrollTop`,
+ * `element.innerHTML`) that has no HTML attribute equivalent. Applied via
+ * plain assignment (`element[name] = value`), never `setAttribute`.
+ */
+export type Prop<Model, _Message> = Readonly<{
+  _tag: 'Prop'
+  name: string
+  value: unknown | Bound<Model, unknown>
+}>
+
+/** A binding attached to an element: a static/bound attribute or DOM
+ *  property write, an event listener, or a mount/unmount lifecycle hook. */
 export type AttrBinding<Model, Message> =
   | Attr<Model, Message>
   | On<Model, Message>
   | MountAttr<Model, Message>
   | UnmountAttr<Model, Message>
+  | OnDispatch<Model, Message>
+  | Prop<Model, Message>
 
 // BINDING
 
@@ -182,6 +213,23 @@ export const on = <Model, Message>(
   event: string,
   toMessage: (event: Event) => Message,
 ): AttrBinding<Model, Message> => ({ _tag: 'On', event, toMessage })
+
+/** Constructs a conditional/asynchronous event listener - see
+ *  {@link OnDispatch}. Internal: not exported from the public factory
+ *  surface, only closed over by `events.ts`'s conditional-dispatch
+ *  members. */
+export const onDispatch = <Model, Message>(
+  event: string,
+  handle: (event: Event, dispatch: (message: Message) => void) => void,
+): AttrBinding<Model, Message> => ({ _tag: 'OnDispatch', event, handle })
+
+/** Constructs a static or bound DOM property write - see {@link Prop}.
+ *  Internal: not exported from the public factory surface; only
+ *  `attributes.ts`'s `Prop`/`InnerHTML` members close over it. */
+export const prop = <Model, Message>(
+  name: string,
+  value: unknown | Bound<Model, unknown>,
+): AttrBinding<Model, Message> => ({ _tag: 'Prop', name, value })
 
 /** Constructs a keyed list binding. `Item` is inferred from `select`. */
 export const list = <Model, Message, Item>(

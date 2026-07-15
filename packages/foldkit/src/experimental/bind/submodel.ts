@@ -53,10 +53,10 @@ export type DynamicInputs<
 /**
  * Re-types one child-typed `AttrBinding` as parent-typed - the seam's
  * publication counterpart to the deleted `childAttributes` wrapper, as pure
- * data transformation instead of a runtime boundary-mapper fold. Four of
- * the five lift-table rows (`On`, `Attr` bound, `Attr` static, `Mount`/
- * `Unmount`); the bare-`Bound` fifth row is inlined in
- * {@link liftPublishedValue}.
+ * data transformation instead of a runtime boundary-mapper fold. The rows
+ * here: `On`, `OnDispatch`, `Attr` (bound and static), `Prop` (bound and
+ * static), and `Mount`/`Unmount`; the bare-`Bound` published-value row is
+ * inlined in {@link liftPublishedValue}.
  */
 const liftAttr = (
   select: Bound<unknown, unknown>,
@@ -70,6 +70,14 @@ const liftAttr = (
         event: onBinding.event,
         toMessage: (event: Event) => toMessage(onBinding.toMessage(event)),
       }),
+      OnDispatch: onDispatchBinding => ({
+        _tag: 'OnDispatch' as const,
+        event: onDispatchBinding.event,
+        handle: (event: Event, dispatch: (message: unknown) => void) =>
+          onDispatchBinding.handle(event, message =>
+            dispatch(toMessage(message)),
+          ),
+      }),
       Attr: attrBindingValue => {
         if (typeof attrBindingValue.value !== 'function') {
           return attrBindingValue
@@ -82,6 +90,18 @@ const liftAttr = (
         return {
           _tag: 'Attr' as const,
           name: attrBindingValue.name,
+          value: (parentModel: unknown) => childBound(select(parentModel)),
+        }
+      },
+      Prop: propBinding => {
+        if (typeof propBinding.value !== 'function') {
+          return propBinding
+        }
+        /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- propBinding.value's `Bound<Child, unknown>` shape is confirmed by the `typeof === 'function'` guard above; function-valued properties are wrapped in thunks by the `Prop` contract, so a bare function is always the bound form. */
+        const childBound = propBinding.value as Bound<unknown, unknown>
+        return {
+          _tag: 'Prop' as const,
+          name: propBinding.name,
           value: (parentModel: unknown) => childBound(select(parentModel)),
         }
       },

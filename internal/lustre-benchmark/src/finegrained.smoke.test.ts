@@ -1,42 +1,59 @@
-import { mount } from 'foldkit/experimental/bind/render.js'
-import { flush } from 'foldkit/experimental/reactive/scheduler.js'
-import { makeModelStore } from 'foldkit/experimental/reactive/store.js'
-import { describe, expect, it } from 'vitest'
+import { Effect, Fiber } from 'effect'
+import { Runtime } from 'foldkit'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { bindView } from './main.finegrained.js'
-import { GeneratedTodo, type Message, init, update } from './main.js'
+import { Model, init, update } from './main.js'
+
+let container: HTMLElement
+let runningFiber: Fiber.Fiber<void> | null = null
+
+afterEach(async () => {
+  if (runningFiber !== null) {
+    await Effect.runPromise(Fiber.interrupt(runningFiber))
+    runningFiber = null
+  }
+  container.remove()
+})
 
 describe('main.finegrained bindView', () => {
-  it('boots in happy-dom and renders a row after dispatching GeneratedTodo', () => {
-    const container = document.createElement('div')
+  it('boots via Runtime.makeElement and renders a row after Enter-submitting a new todo', async () => {
+    container = document.createElement('div')
     document.body.appendChild(container)
 
-    const [initialModel] = init()
-    const store = makeModelStore(initialModel)
-    let currentModel = initialModel
-
-    const dispatch = (message: Message): void => {
-      const [nextModel] = update(currentModel, message)
-      currentModel = nextModel
-      store.reconcile(currentModel)
-      flush()
-    }
-
-    mount({
-      binding: bindView,
-      view: store.view,
-      dispatch,
+    const application = Runtime.makeElement({
+      Model,
+      init,
+      update,
+      bindView,
       container,
-      document,
+      devTools: false,
     })
-    dispatch(GeneratedTodo({ id: 'todo-1', timestamp: 0, text: 'buy milk' }))
 
-    expect(container.querySelectorAll('.todo-list li')).toHaveLength(1)
+    runningFiber = Effect.runFork(application.start())
+
+    const newTodoInput = await vi.waitFor(() => {
+      const input = container.querySelector<HTMLInputElement>('.new-todo')
+      expect(input).not.toBeNull()
+      /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+      return input as HTMLInputElement
+    })
+
+    newTodoInput.value = 'buy milk'
+    newTodoInput.dispatchEvent(new Event('input', { bubbles: true }))
+    newTodoInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    )
+
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('.todo-list li')).toHaveLength(1)
+    })
     expect(container.querySelector('.todo-list li label')?.textContent).toBe(
       'buy milk',
     )
-    expect(container.querySelector('.todo-count strong')?.textContent).toBe('1')
-
-    container.remove()
+    expect(container.querySelector('.todo-count strong')?.textContent).toBe(
+      '1',
+    )
+    expect(newTodoInput.value).toBe('')
   })
 })

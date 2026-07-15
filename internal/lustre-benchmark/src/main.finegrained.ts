@@ -1,15 +1,10 @@
-import { Array } from 'effect'
-import {
-  type Binding,
-  attr,
-  cond,
-  el,
-  list,
-  on,
-  text,
-} from 'foldkit/experimental/bind/binding.js'
+import { Array, Effect, Queue, Stream } from 'effect'
+import { Mount } from 'foldkit'
+import { Bind } from 'foldkit/experimental'
 
 import {
+  AddedTodo,
+  CancelledEdit,
   ClearedCompleted,
   DeletedTodo,
   type Filter,
@@ -26,21 +21,84 @@ import {
   UpdatedNewTodo,
 } from './main.js'
 
+type Binding<Model, Message> = Bind.Binding<Model, Message>
+const { attr, cond, el, list, on, onMount, text } = Bind
+
 // VIEW
 //
 // The fine-grained-rendering counterpart to `main.ts`'s `view`: the same
 // TodoMVC-identical markup (classes, ids, structure), described as a
-// `Binding` tree against the frozen `experimental/bind/binding.ts`
-// constructors instead of built via the `html` factory.
+// `Binding` tree against `foldkit/experimental`'s `Bind` constructors
+// instead of built via the `html` factory.
+
+// MOUNT ACTIONS
 //
-// NOTE: `on()`'s `toMessage` always dispatches (frozen contract - no
+// `on()`'s `toMessage` always dispatches (frozen IR contract - no
 // Option-returning variant like `html`'s `OnKeyDownPreventDefault`), so the
 // Enter-only `.new-todo` submit and Enter/Escape-only `.edit` save/cancel
-// semantics cannot be expressed as `on('keydown', ...)` bindings here without
-// dispatching a spurious Message on every other key. `entry.finegrained.ts`
-// attaches a single delegated `keydown` listener on the container for those
-// two cases instead; every other interaction (click, dblclick, input, blur)
-// binds directly below.
+// semantics are attached as per-element `Mount.defineStream` actions below
+// instead of `on('keydown', ...)` bindings: the Stream only offers a
+// Message for the key that matters, so every other keystroke reaches
+// neither `dispatch` nor `update`.
+
+const SubmitNewTodoOnEnter = Mount.defineStream(
+  'SubmitNewTodoOnEnter',
+  AddedTodo,
+)(element =>
+  Stream.callback<typeof AddedTodo.Type>(queue =>
+    Effect.gen(function* () {
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const handler = (event: Event): void => {
+            const keyboardEvent = event as KeyboardEvent
+            if (keyboardEvent.key !== 'Enter') {
+              return
+            }
+            keyboardEvent.preventDefault()
+            Queue.offerUnsafe(queue, AddedTodo())
+          }
+          element.addEventListener('keydown', handler)
+          return handler
+        }),
+        handler =>
+          Effect.sync(() => element.removeEventListener('keydown', handler)),
+      )
+      return yield* Effect.never
+    }),
+  ),
+)
+
+const SaveOrCancelEditOnKey = Mount.defineStream(
+  'SaveOrCancelEditOnKey',
+  SavedEdit,
+  CancelledEdit,
+)(element =>
+  Stream.callback<typeof SavedEdit.Type | typeof CancelledEdit.Type>(queue =>
+    Effect.gen(function* () {
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const handler = (event: Event): void => {
+            const keyboardEvent = event as KeyboardEvent
+            if (keyboardEvent.key === 'Enter') {
+              keyboardEvent.preventDefault()
+              Queue.offerUnsafe(queue, SavedEdit())
+              return
+            }
+            if (keyboardEvent.key === 'Escape') {
+              keyboardEvent.preventDefault()
+              Queue.offerUnsafe(queue, CancelledEdit())
+            }
+          }
+          element.addEventListener('keydown', handler)
+          return handler
+        }),
+        handler =>
+          Effect.sync(() => element.removeEventListener('keydown', handler)),
+      )
+      return yield* Effect.never
+    }),
+  ),
+)
 
 const todoItemClass = (todo: Todo, isEditing: boolean): string => {
   if (todo.completed && isEditing) {
@@ -103,6 +161,7 @@ const headerBinding: Binding<Model, Message> = el<Model, Message>(
         on<Model, Message>('input', (event: Event) =>
           UpdatedNewTodo({ text: (event.target as HTMLInputElement).value }),
         ),
+        onMount<Model, Message>(SubmitNewTodoOnEnter()),
       ],
       [],
     ),
@@ -162,6 +221,7 @@ const renderEditingRow = (readTodo: () => Todo): Binding<Model, Message> =>
         UpdatedEditingTodo({ text: (event.target as HTMLInputElement).value }),
       ),
       on<Model, Message>('blur', () => SavedEdit()),
+      onMount<Model, Message>(SaveOrCancelEditOnKey()),
     ],
     [],
   )
@@ -312,8 +372,10 @@ const footerSectionBinding: Binding<Model, Message> = el<Model, Message>(
  * Renders the same TodoMVC reference markup as `main.ts`'s `view` (same
  * classes, ids, and element structure) so the harness's CSS-selector-driven
  * runbook exercises this slot identically to the naive and optimised
- * slots. Mounted via `experimental/bind/render.ts`'s `mount()` from
- * `entry.finegrained.ts`, not through `Runtime.run`.
+ * slots. Mounted via `foldkit`'s `Runtime.run(Runtime.makeElement({ …,
+ * bindView }))` from `entry.finegrained.ts`, the same public runtime
+ * surface `entry.ts` and `entry.optimised.ts` use for their `view`-based
+ * slots.
  */
 export const bindView: Binding<Model, Message> = el<Model, Message>(
   'section',

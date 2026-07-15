@@ -22,6 +22,8 @@ import type {
   List,
   MountAttr,
   On,
+  OnDispatch,
+  Prop,
   Sub,
   Text,
   UnmountAttr,
@@ -92,6 +94,38 @@ const buildAttr = <Model, Message>(
   })
 }
 
+/** Applies a {@link Prop} binding: a static value is assigned once at
+ *  build, a bound value gets its own render effect re-assigning only when
+ *  the read changes by `Equal.equals`. A bare function value is always the
+ *  bound form - a function-valued property must be wrapped in a thunk
+ *  (`prop('callback', () => callbackFn)`). */
+const buildProp = <Model, Message>(
+  element: Element,
+  propBinding: Prop<Model, Message>,
+  model: Model,
+  ctx: Ctx<Message>,
+): void => {
+  const { name, value } = propBinding
+  if (typeof value !== 'function') {
+    ;(element as unknown as Record<string, unknown>)[name] = value
+    return
+  }
+  /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the `typeof === 'function'` guard confirms the bound form; `Prop`'s contract wraps function-valued properties in thunks, so a bare function is never a static value. */
+  const read = value as Bound<Model, unknown>
+  let hasWritten = false
+  let lastWritten: unknown
+  makeRenderEffect(() => {
+    ctx.onThunkEvaluation?.()
+    const next = read(model)
+    if (hasWritten && Equal.equals(lastWritten, next)) {
+      return
+    }
+    hasWritten = true
+    lastWritten = next
+    ;(element as unknown as Record<string, unknown>)[name] = next
+  })
+}
+
 const buildListener = <Model, Message>(
   element: Element,
   onBinding: On<Model, Message>,
@@ -103,6 +137,23 @@ const buildListener = <Model, Message>(
   element.addEventListener(onBinding.event, listener)
   onCleanup(() => {
     element.removeEventListener(onBinding.event, listener)
+  })
+}
+
+/** Attaches an {@link OnDispatch} listener: `handle` decides for itself
+ *  whether/when to call `dispatch`, so this wires the raw DOM listener
+ *  straight to it instead of always dispatching a return value. */
+const buildDispatchListener = <Model, Message>(
+  element: Element,
+  onDispatchBinding: OnDispatch<Model, Message>,
+  ctx: Ctx<Message>,
+): void => {
+  const listener = (event: Event): void => {
+    onDispatchBinding.handle(event, ctx.dispatch)
+  }
+  element.addEventListener(onDispatchBinding.event, listener)
+  onCleanup(() => {
+    element.removeEventListener(onDispatchBinding.event, listener)
   })
 }
 
@@ -197,12 +248,20 @@ const buildElement = <Model, Message>(
       buildListener(element, attrBinding, ctx)
       continue
     }
+    if (attrBinding._tag === 'OnDispatch') {
+      buildDispatchListener(element, attrBinding, ctx)
+      continue
+    }
     if (attrBinding._tag === 'Mount') {
       buildMount(element, attrBinding, ctx)
       continue
     }
     if (attrBinding._tag === 'Unmount') {
       buildUnmount(element, attrBinding, ctx)
+      continue
+    }
+    if (attrBinding._tag === 'Prop') {
+      buildProp(element, attrBinding, model, ctx)
       continue
     }
     buildAttr(element, attrBinding, model, ctx)
@@ -358,6 +417,16 @@ type TemplateSite =
   | Readonly<{ kind: 'text'; path: ReadonlyArray<number> }>
   | Readonly<{ kind: 'attr'; path: ReadonlyArray<number>; attrIndex: number }>
   | Readonly<{ kind: 'on'; path: ReadonlyArray<number>; attrIndex: number }>
+  | Readonly<{
+      kind: 'ondispatch'
+      path: ReadonlyArray<number>
+      attrIndex: number
+    }>
+  | Readonly<{
+      kind: 'prop'
+      path: ReadonlyArray<number>
+      attrIndex: number
+    }>
   | Readonly<{ kind: 'mount'; path: ReadonlyArray<number>; attrIndex: number }>
   | Readonly<{
       kind: 'unmount'
@@ -405,12 +474,23 @@ const buildTemplateNode = <Model, Message>(
       sites.push({ kind: 'on', path, attrIndex })
       return
     }
+    if (attrBinding._tag === 'OnDispatch') {
+      sites.push({ kind: 'ondispatch', path, attrIndex })
+      return
+    }
     if (attrBinding._tag === 'Mount') {
       sites.push({ kind: 'mount', path, attrIndex })
       return
     }
     if (attrBinding._tag === 'Unmount') {
       sites.push({ kind: 'unmount', path, attrIndex })
+      return
+    }
+    if (attrBinding._tag === 'Prop') {
+      // NOTE: unlike a static `Attr`, a static `Prop` cannot be baked into
+      // the template skeleton - `cloneNode` copies attributes but never DOM
+      // properties - so every `Prop` is a per-instantiation site.
+      sites.push({ kind: 'prop', path, attrIndex })
       return
     }
     if (typeof attrBinding.value === 'function') {
@@ -521,6 +601,20 @@ const instantiateFromTemplate = <Model, Message>(
           site.attrIndex
         ] as On<Model, Message>
         buildListener(target as Element, onBinding, ctx)
+        break
+      }
+      case 'ondispatch': {
+        const onDispatchBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as OnDispatch<Model, Message>
+        buildDispatchListener(target as Element, onDispatchBinding, ctx)
+        break
+      }
+      case 'prop': {
+        const propBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as Prop<Model, Message>
+        buildProp(target as Element, propBinding, model, ctx)
         break
       }
       case 'list': {
