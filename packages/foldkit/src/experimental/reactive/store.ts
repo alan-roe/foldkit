@@ -1,4 +1,7 @@
+import { Option } from 'effect'
+
 import { getCurrentObserver } from './effect.js'
+import { type Owner, disposeOwner, makeOwner } from './owner.js'
 import { type Signal, makeSignal } from './signal.js'
 
 // STORE
@@ -21,6 +24,7 @@ type StoreNode = {
   raw: object
   readonly signals: Map<PropertyKey, Signal<unknown>>
   readonly children: Map<PropertyKey, StoreNode>
+  readonly owner: Owner
   proxy: object
 }
 
@@ -65,7 +69,7 @@ const readChild = (
   if (existingChild !== undefined) {
     return existingChild.proxy
   }
-  const child = makeNode(value)
+  const child = makeNode(value, node.owner)
   node.children.set(key, child)
   return child.proxy
 }
@@ -107,11 +111,12 @@ const storeHandler: ProxyHandler<StoreNode> = {
 // handler closes over `node` to always read the current `raw`). The object
 // literal is built without `proxy`, then completed by direct assignment
 // before `node` is returned or read anywhere else.
-const makeNode = (raw: object): StoreNode => {
+const makeNode = (raw: object, owner: Owner): StoreNode => {
   const node = {
     raw,
     signals: new Map<PropertyKey, Signal<unknown>>(),
     children: new Map<PropertyKey, StoreNode>(),
+    owner,
   } as StoreNode
   node.proxy = new Proxy(node, storeHandler)
   nodeByProxy.set(node.proxy, node)
@@ -169,7 +174,8 @@ const disposeNode = (node: StoreNode): void => {
 export const makeModelStore = <Model extends object>(
   initial: Model,
 ): ModelStore<Model> => {
-  const root = makeNode(initial)
+  const owner = makeOwner(Option.none())
+  const root = makeNode(initial, owner)
   return {
     view: root.proxy as Model,
     reconcile: (next: Model): void => {
@@ -177,9 +183,19 @@ export const makeModelStore = <Model extends object>(
     },
     dispose: (): void => {
       disposeNode(root)
+      disposeOwner(owner)
     },
   }
 }
+
+/** The `Owner` that owns every `derived.ts` computed lazily allocated for
+ *  `proxyOrNestedProxy`'s store, regardless of which node in the store's
+ *  tree the computed was keyed against: every computed in a store shares
+ *  the store's one root `Owner`, so store teardown disposes them all in
+ *  one pass. `undefined` when `proxyOrNestedProxy` is not a store proxy -
+ *  the same miss `derived.ts` treats as its raw-fallback signal. */
+export const getStoreOwner = (proxyOrNestedProxy: object): Owner | undefined =>
+  nodeByProxy.get(proxyOrNestedProxy)?.owner
 
 // TESTING
 

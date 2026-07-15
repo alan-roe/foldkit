@@ -29,10 +29,15 @@ export type SubscriberHost = {
 
 /** The ambient tracking scope a signal read registers against: the running
  *  render effect. Carries its own source-list head/tail so dependencies
- *  collected on one run can be cleared in O(1) per edge on the next. */
+ *  collected on one run can be cleared in O(1) per edge on the next.
+ *  `markStale`, when present, marks this observer as a `derived.ts`
+ *  computed node: `signal.ts`'s write-time subscriber walk calls it
+ *  instead of `markDirty` so a stale computed forwards dirtiness to its
+ *  own subscribers without entering the scheduler. */
 export type TrackedObserver = SchedulableEffect & {
   sourcesHead: Link | undefined
   sourcesTail: Link | undefined
+  markStale?: () => void
 }
 
 let currentObserver: TrackedObserver | undefined
@@ -43,6 +48,25 @@ let nextEffectId = 0
  *  any render effect: reads are plain, untracked reads. */
 export const getCurrentObserver = (): TrackedObserver | undefined =>
   currentObserver
+
+/** Runs `body` with `observer` as the ambient tracked observer, restoring
+ *  the previous observer afterward even if `body` throws. `derived.ts`'s
+ *  computed nodes are pull-based (evaluated from `read()`, never from a
+ *  scheduler pass), so they cannot install themselves via
+ *  `makeRenderEffect`; this is the one seam that lets them evaluate `f`
+ *  under tracking, mirroring `execute`'s save/restore below. */
+export const runWithObserver = <A>(
+  observer: TrackedObserver,
+  body: () => A,
+): A => {
+  const previousObserver = currentObserver
+  currentObserver = observer
+  try {
+    return body()
+  } finally {
+    currentObserver = previousObserver
+  }
+}
 
 /** Registers a dependency: appends a fresh `Link` to the tail of both
  *  `observer`'s source list and `host`'s subscriber list. Called from

@@ -1,6 +1,7 @@
 import { Equal, Option } from 'effect'
 
 import type { MountAction } from '../../mount/index.js'
+import { __markBindMountComplete } from '../reactive/derived.js'
 import { makeRenderEffect } from '../reactive/effect.js'
 import {
   type Owner,
@@ -914,6 +915,7 @@ export const mount = <Model, Message>(
   runWithOwner(rootOwner, () => {
     buildChildren(options.container, [options.binding], options.view, ctx)
   })
+  __markBindMountComplete()
 
   return {
     dispose: (): void => {

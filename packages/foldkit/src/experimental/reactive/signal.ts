@@ -22,6 +22,26 @@ export type Signal<A> = Readonly<{
   write: (next: A) => void
 }>
 
+/** Walks `host`'s subscriber list, notifying each subscriber that its
+ *  source changed: a `derived.ts` computed (its `Link.effect.markStale` is
+ *  present) gets stale-marked instead of scheduled, so staleness forwards
+ *  through computed chains without ever entering the scheduler; every
+ *  other subscriber gets `markDirty`d for the next `scheduler.flush()`.
+ *  Shared by every `Signal.write` and by a computed's own stale-forward,
+ *  so both notification paths stay in lockstep. */
+export const notifySubscribers = (host: SubscriberHost): void => {
+  let link = host.subsHead
+  while (link !== undefined) {
+    const subscriber = link.effect
+    if (subscriber.markStale !== undefined) {
+      subscriber.markStale()
+    } else {
+      markDirty(subscriber)
+    }
+    link = link.nextSub
+  }
+}
+
 /**
  * Creates a `Signal` holding `initial`. `equivalence` decides whether a
  * `write` is a no-op; it defaults to Effect's structural `Equal.equals`, so
@@ -50,11 +70,7 @@ export const makeSignal = <A>(
       return
     }
     value = next
-    let link = host.subsHead
-    while (link !== undefined) {
-      markDirty(link.effect)
-      link = link.nextSub
-    }
+    notifySubscribers(host)
   }
 
   return { read, peek, write }
