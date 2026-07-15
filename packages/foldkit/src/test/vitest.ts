@@ -21,6 +21,8 @@ declare module 'vitest' {
     toHaveId(expected: string): this
     toExist(): this
     toBeAbsent(): this
+    toHaveMount(name?: string): this
+    toHaveUnmount(expectedMessage?: unknown): this
   }
 }
 

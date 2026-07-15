@@ -1,3 +1,4 @@
+import { Stream } from 'effect'
 import { describe, expect, test } from 'vitest'
 
 import * as Bind from '../experimental/bind/public.js'
@@ -236,5 +237,395 @@ describe('Scene with a bindView program (makeApplication shape)', () => {
       Scene.click(Scene.testId('todo-1')),
       Scene.expect(Scene.testId('done-count')).toHaveText('1 done'),
     )
+  })
+})
+
+// FIXTURE: Sub/Host - a Counter Submodel embedded via `Bind.submodel`. The
+// consumer's Host content (the counter button) is built from the Counter's
+// own published `on('click', ...)` group, so clicking it exercises both a
+// Sub-originated handler and a locator resolving inside the Host island in
+// the same interaction.
+
+type CounterModel = Readonly<{ count: number }>
+
+type CounterMessage = Readonly<{ _tag: 'IncrementedCounter'; step: number }>
+
+type CounterShape = Readonly<{
+  button: ReadonlyArray<Bind.AttrBinding<CounterModel, CounterMessage>>
+}>
+
+const incrementedCounter = (step: number): CounterMessage => ({
+  _tag: 'IncrementedCounter',
+  step,
+})
+
+const counterUpdate = (
+  model: CounterModel,
+  message: CounterMessage,
+): readonly [CounterModel, ReadonlyArray<never>] => [
+  { count: model.count + message.step },
+  [],
+]
+
+const counterChildView = (
+  viewInputs: Readonly<{
+    toView: (
+      published: CounterShape,
+    ) => Bind.Binding<CounterModel, CounterMessage>
+  }>,
+): Bind.Binding<CounterModel, CounterMessage> =>
+  viewInputs.toView({
+    button: [
+      Bind.attr('data-testid', 'counter-button'),
+      Bind.on('click', () => incrementedCounter(5)),
+    ],
+  })
+
+type SubHostRootModel = Readonly<{
+  counter: CounterModel
+  lastReceived: string
+}>
+
+type SubHostRootMessage = Readonly<{
+  _tag: 'GotCounterMessage'
+  message: CounterMessage
+}>
+
+const gotCounterMessage = (message: CounterMessage): SubHostRootMessage => ({
+  _tag: 'GotCounterMessage',
+  message,
+})
+
+const subHostInitialModel: SubHostRootModel = {
+  counter: { count: 0 },
+  lastReceived: 'none',
+}
+
+const subHostUpdate = (
+  model: SubHostRootModel,
+  message: SubHostRootMessage,
+): readonly [SubHostRootModel, ReadonlyArray<never>] => {
+  const [nextCounter] = counterUpdate(model.counter, message.message)
+  return [
+    {
+      counter: nextCounter,
+      lastReceived: `step:${message.message.step}`,
+    },
+    [],
+  ]
+}
+
+const subHostRootView: Bind.Binding<SubHostRootModel, SubHostRootMessage> =
+  Bind.div(
+    [],
+    [
+      Bind.submodel<
+        SubHostRootModel,
+        SubHostRootMessage,
+        CounterModel,
+        CounterMessage,
+        CounterShape
+      >({
+        select: (model: SubHostRootModel) => model.counter,
+        toMessage: gotCounterMessage,
+        view: counterChildView,
+        viewInputs: {
+          toView: published =>
+            Bind.div(
+              [Bind.attr('data-testid', 'counter-host')],
+              [
+                Bind.p([], [Bind.text('Counter host content')]),
+                Bind.button(published.button, [Bind.text('Increment')]),
+              ],
+            ),
+        },
+      }),
+      Bind.p(
+        [Bind.attr('data-testid', 'last-received')],
+        [Bind.text(model => model.lastReceived)],
+      ),
+    ],
+  )
+
+// FIXTURE: nested two-level Sub - Level1 embeds a Level0 Submodel of its own
+// (a grandchild, alongside its own Host content), so a click on Level0's
+// button must compose both `toMessage` lifts outward: Level1's static
+// `liftAttr` (child -> Level1) composed with materialize's dynamic `wrap`
+// (Level1 -> root).
+
+type Level0Model = Readonly<{ count: number }>
+
+type Level0Message = Readonly<{ _tag: 'IncrementedLevel0'; step: number }>
+
+type Level0Shape = Readonly<{
+  button: ReadonlyArray<Bind.AttrBinding<Level0Model, Level0Message>>
+}>
+
+const incrementedLevel0 = (step: number): Level0Message => ({
+  _tag: 'IncrementedLevel0',
+  step,
+})
+
+const level0Update = (
+  model: Level0Model,
+  message: Level0Message,
+): readonly [Level0Model, ReadonlyArray<never>] => [
+  { count: model.count + message.step },
+  [],
+]
+
+const level0ChildView = (
+  viewInputs: Readonly<{
+    toView: (published: Level0Shape) => Bind.Binding<Level0Model, Level0Message>
+  }>,
+): Bind.Binding<Level0Model, Level0Message> =>
+  viewInputs.toView({
+    button: [
+      Bind.attr('data-testid', 'level0-button'),
+      Bind.on('click', () => incrementedLevel0(7)),
+    ],
+  })
+
+type Level1Model = Readonly<{ level0: Level0Model }>
+
+type Level1Message = Readonly<{ _tag: 'GotLevel0'; message: Level0Message }>
+
+type Level1Shape = Readonly<{
+  wrapper: ReadonlyArray<Bind.AttrBinding<Level1Model, Level1Message>>
+}>
+
+const gotLevel0 = (message: Level0Message): Level1Message => ({
+  _tag: 'GotLevel0',
+  message,
+})
+
+const level1Update = (
+  model: Level1Model,
+  message: Level1Message,
+): readonly [Level1Model, ReadonlyArray<never>] => {
+  const [nextLevel0] = level0Update(model.level0, message.message)
+  return [{ level0: nextLevel0 }, []]
+}
+
+const level1ChildView = (
+  viewInputs: Readonly<{
+    toView: (published: Level1Shape) => Bind.Binding<Level1Model, Level1Message>
+  }>,
+): Bind.Binding<Level1Model, Level1Message> =>
+  Bind.div(
+    [],
+    [
+      viewInputs.toView({
+        wrapper: [Bind.attr('data-testid', 'level1-wrapper')],
+      }),
+      Bind.submodel<
+        Level1Model,
+        Level1Message,
+        Level0Model,
+        Level0Message,
+        Level0Shape
+      >({
+        select: (level1Model: Level1Model) => level1Model.level0,
+        toMessage: gotLevel0,
+        view: level0ChildView,
+        viewInputs: {
+          toView: publishedLevel0 =>
+            Bind.button(publishedLevel0.button, [
+              Bind.text('Level0 button (grandchild)'),
+            ]),
+        },
+      }),
+    ],
+  )
+
+type NestedRootModel = Readonly<{
+  level1: Level1Model
+  lastReceived: string
+}>
+
+type NestedRootMessage = Readonly<{
+  _tag: 'GotLevel1'
+  message: Level1Message
+}>
+
+const gotLevel1 = (message: Level1Message): NestedRootMessage => ({
+  _tag: 'GotLevel1',
+  message,
+})
+
+const nestedInitialModel: NestedRootModel = {
+  level1: { level0: { count: 0 } },
+  lastReceived: 'none',
+}
+
+const nestedUpdate = (
+  model: NestedRootModel,
+  message: NestedRootMessage,
+): readonly [NestedRootModel, ReadonlyArray<never>] => {
+  const [nextLevel1] = level1Update(model.level1, message.message)
+  return [{ level1: nextLevel1, lastReceived: JSON.stringify(message) }, []]
+}
+
+const nestedRootView: Bind.Binding<NestedRootModel, NestedRootMessage> =
+  Bind.div(
+    [],
+    [
+      Bind.submodel<
+        NestedRootModel,
+        NestedRootMessage,
+        Level1Model,
+        Level1Message,
+        Level1Shape
+      >({
+        select: (model: NestedRootModel) => model.level1,
+        toMessage: gotLevel1,
+        view: level1ChildView,
+        viewInputs: {
+          toView: publishedWrapper =>
+            Bind.div(publishedWrapper.wrapper, [
+              Bind.text('Level1 host wrapper'),
+            ]),
+        },
+      }),
+      Bind.p(
+        [Bind.attr('data-testid', 'nested-last-received')],
+        [Bind.text(model => model.lastReceived)],
+      ),
+    ],
+  )
+
+// FIXTURE: a Sub-published Mount group, proving `Scene.Mount.*`/`toHaveMount`
+// read the bind path's `mounts` field exactly like the `html` path's
+// `OnMount` marker.
+
+type MountModel = Readonly<{ isPanelOpen: boolean }>
+
+type MountMessage = Readonly<{ _tag: 'MountFired' }>
+
+const mountedPanel = { name: 'MountedPanel' }
+
+type MountShape = Readonly<{
+  panel: ReadonlyArray<Bind.AttrBinding<MountModel, MountMessage>>
+}>
+
+const mountUpdate = (
+  model: MountModel,
+  _message: MountMessage,
+): readonly [MountModel, ReadonlyArray<never>] => [model, []]
+
+const mountChildView = (
+  viewInputs: Readonly<{
+    toView: (published: MountShape) => Bind.Binding<MountModel, MountMessage>
+  }>,
+): Bind.Binding<MountModel, MountMessage> =>
+  viewInputs.toView({
+    panel: [
+      Bind.attr('data-testid', 'mount-panel'),
+      Bind.onMount({ name: 'MountedPanel', f: () => Stream.empty }),
+    ],
+  })
+
+type MountRootModel = Readonly<{ child: MountModel }>
+
+type MountRootMessage = Readonly<{
+  _tag: 'GotMountChild'
+  message: MountMessage
+}>
+
+const gotMountChild = (message: MountMessage): MountRootMessage => ({
+  _tag: 'GotMountChild',
+  message,
+})
+
+const mountRootUpdate = (
+  model: MountRootModel,
+  message: MountRootMessage,
+): readonly [MountRootModel, ReadonlyArray<never>] => {
+  const [nextChild] = mountUpdate(model.child, message.message)
+  return [{ child: nextChild }, []]
+}
+
+const mountRootView: Bind.Binding<MountRootModel, MountRootMessage> = Bind.div(
+  [],
+  [
+    Bind.submodel<
+      MountRootModel,
+      MountRootMessage,
+      MountModel,
+      MountMessage,
+      MountShape
+    >({
+      select: (model: MountRootModel) => model.child,
+      toMessage: gotMountChild,
+      view: mountChildView,
+      viewInputs: {
+        toView: published => Bind.div(published.panel, []),
+      },
+    }),
+  ],
+)
+
+// TESTS
+
+describe('Scene with a bindView program (Sub/Host boundaries)', () => {
+  test('a locator finds content inside a Host island, and clicking a Sub-published handler dispatches the parent-typed Message with its payload', () => {
+    Scene.scene(
+      { update: subHostUpdate, bindView: subHostRootView },
+      Scene.with(subHostInitialModel),
+      Scene.expect(Scene.testId('counter-host')).toExist(),
+      Scene.expect(Scene.testId('counter-host')).toContainText(
+        'Counter host content',
+      ),
+      Scene.expect(Scene.testId('last-received')).toHaveText('none'),
+      Scene.click(Scene.testId('counter-button')),
+      Scene.expect(Scene.testId('last-received')).toHaveText('step:5'),
+    )
+  })
+
+  test('locators/matchers work unchanged for Sub/Host content: role, class, and attr all resolve through the Host island', () => {
+    Scene.scene(
+      { update: subHostUpdate, bindView: subHostRootView },
+      Scene.with(subHostInitialModel),
+      Scene.expect(Scene.testId('counter-button')).toHaveHandler('click'),
+      Scene.expect(Scene.testId('counter-button')).toExist(),
+    )
+  })
+
+  test('a nested two-level Sub interaction composes wrapping outward', () => {
+    Scene.scene(
+      { update: nestedUpdate, bindView: nestedRootView },
+      Scene.with(nestedInitialModel),
+      Scene.expect(Scene.testId('level1-wrapper')).toExist(),
+      Scene.expect(Scene.testId('nested-last-received')).toHaveText('none'),
+      Scene.click(Scene.testId('level0-button')),
+      Scene.expect(Scene.testId('nested-last-received')).toHaveText(
+        JSON.stringify(gotLevel1(gotLevel0(incrementedLevel0(7)))),
+      ),
+    )
+  })
+
+  // NOTE: materialize's `mounts` field carries no `messageMappers` (unlike
+  // the html path's `FoldkitMountMarker`) - resolving a bind-path Mount
+  // dispatches `resultMessage` directly with no boundary lift, so the
+  // result must already be parent-typed.
+  test('a Sub-published onMount is tracked by Scene.Mount.expectHas/expectExact, mirroring the html path', () => {
+    Scene.scene(
+      { update: mountRootUpdate, bindView: mountRootView },
+      Scene.with({ child: { isPanelOpen: true } }),
+      Scene.Mount.expectHas(mountedPanel),
+      Scene.Mount.expectExact(mountedPanel),
+      Scene.expect(Scene.testId('mount-panel')).toHaveMount('MountedPanel'),
+      Scene.Mount.resolve(mountedPanel, gotMountChild({ _tag: 'MountFired' })),
+    )
+  })
+
+  test('toHaveMount fails clearly when no such Mount is pending', () => {
+    expect(() =>
+      Scene.scene(
+        { update: mountRootUpdate, bindView: mountRootView },
+        Scene.with({ child: { isPanelOpen: true } }),
+        Scene.expect(Scene.testId('mount-panel')).toHaveMount('SomeOtherMount'),
+      ),
+    ).toThrow(/have a pending Mount "SomeOtherMount"/)
   })
 })

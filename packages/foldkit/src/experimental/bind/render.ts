@@ -1,5 +1,6 @@
 import { Equal, Option } from 'effect'
 
+import type { MountAction } from '../../mount/index.js'
 import { makeRenderEffect } from '../reactive/effect.js'
 import {
   type Owner,
@@ -16,17 +17,35 @@ import type {
   Bound,
   Cond,
   El,
+  Host,
   List,
+  MountAttr,
   On,
+  Sub,
   Text,
+  UnmountAttr,
 } from './binding.js'
 
 // CONTEXT
+
+/** Runs `action.f(element)`'s Stream to completion, dispatching each
+ *  emitted Message; returns an interrupt callback for `onCleanup`. Erased
+ *  to `unknown` Message/error so one runner (supplied by the runtime for
+ *  the bindView path) serves every `Ctx<Message>` instantiation, including
+ *  the `unknown`-typed contexts `Sub`/`Host` recurse into. `undefined`
+ *  when no runner was supplied (tests, `materialize`) - Mount attrs are
+ *  then inert, matching today's test/Scene parity. */
+type RunMountAction = (
+  action: MountAction<unknown, unknown>,
+  element: Element,
+  dispatch: (message: unknown) => void,
+) => () => void
 
 type Ctx<Message> = Readonly<{
   document: Document
   dispatch: (message: Message) => void
   onThunkEvaluation: (() => void) | undefined
+  runMountAction: RunMountAction | undefined
 }>
 
 // ATTRIBUTES
@@ -86,6 +105,45 @@ const buildListener = <Model, Message>(
   })
 }
 
+/** Invokes `ctx.runMountAction`, when present, right after element
+ *  creation; the returned interrupt is registered with `onCleanup` so
+ *  disposal (of this element's owner, or any ancestor's) interrupts the
+ *  Mount's fiber. When no runner is supplied - `mount()` without
+ *  `runMountAction`, or the `materialize` test path - `Mount` attrs are
+ *  inert, matching today's test/Scene parity. */
+const buildMount = <Model, Message>(
+  element: Element,
+  mountBinding: MountAttr<Model, Message>,
+  ctx: Ctx<Message>,
+): void => {
+  const { runMountAction } = ctx
+  if (runMountAction === undefined) {
+    return
+  }
+  const interrupt = runMountAction(
+    mountBinding.action,
+    element,
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- runMountAction is erased to `unknown` Message so one runner serves every Ctx<Message> instantiation; the only Messages it ever dispatches are ones `mountBinding.action.f` itself produced, which are Message-typed by construction (List-precedent erasure, binding.ts:79-80).
+    ctx.dispatch as (message: unknown) => void,
+  )
+  onCleanup(interrupt)
+}
+
+/** `Unmount` has no live behaviour of its own beyond registering the
+ *  dispatch: owner cleanups run in deterministic order before the DOM
+ *  range is detached, so this needs no `resolveUnmount`-style snapshot -
+ *  `ctx.dispatch` is already immortal, composed data by the time it
+ *  reaches here (through any enclosing `Sub`). */
+const buildUnmount = <Model, Message>(
+  _element: Element,
+  unmountBinding: UnmountAttr<Model, Message>,
+  ctx: Ctx<Message>,
+): void => {
+  onCleanup(() => {
+    ctx.dispatch(unmountBinding.message)
+  })
+}
+
 // TEXT
 
 /** Attaches the bound-text render effect to an existing text node - shared
@@ -138,6 +196,14 @@ const buildElement = <Model, Message>(
       buildListener(element, attrBinding, ctx)
       continue
     }
+    if (attrBinding._tag === 'Mount') {
+      buildMount(element, attrBinding, ctx)
+      continue
+    }
+    if (attrBinding._tag === 'Unmount') {
+      buildUnmount(element, attrBinding, ctx)
+      continue
+    }
     buildAttr(element, attrBinding, model, ctx)
   }
   buildChildren(element, elBinding.children, model, ctx)
@@ -187,6 +253,14 @@ const buildChildren = <Model, Message>(
       topNodes.push(anchor)
       continue
     }
+    if (child._tag === 'Sub') {
+      topNodes.push(...buildSub(parent, child, model, ctx, referenceNode))
+      continue
+    }
+    if (child._tag === 'Host') {
+      topNodes.push(...buildHost(parent, child, ctx, referenceNode))
+      continue
+    }
     const node =
       child._tag === 'El'
         ? buildElement(child, model, ctx)
@@ -206,6 +280,76 @@ const buildChildren = <Model, Message>(
   return topNodes
 }
 
+// SUBMODEL
+
+/**
+ * `Sub` is a transparent boundary, not its own DOM node: it fills the
+ * shared `frame` with the CURRENT (parent-side) model/dispatch - not the
+ * child's - so a `Host` mounted anywhere inside `binding` can read back
+ * out to the frame this `Sub` captured, then recurses into `binding` with
+ * the child-side model (`select(model)`) and a dispatch composed through
+ * `toMessage`. `onCleanup` clears the cell so a `Host` can never observe
+ * a stale frame after this `Sub`'s owner disposes.
+ */
+const buildSub = <Model, Message>(
+  parent: Node & ParentNode,
+  subBinding: Sub<Model, Message>,
+  model: Model,
+  ctx: Ctx<Message>,
+  referenceNode: Node | null,
+): ReadonlyArray<Node> => {
+  const { select, toMessage, binding, frame } = subBinding
+  frame.current = {
+    model,
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- Frame erases Message to `unknown` at the Sub/Host boundary so one FrameCell shape serves every Sub, mirroring the Binding union's Item erasure (binding.ts:79-80). A Host reading this frame back only ever calls it with Messages this Sub's own `ctx.dispatch` already accepts.
+    dispatch: ctx.dispatch as (message: unknown) => void,
+  }
+  onCleanup(() => {
+    frame.current = undefined
+  })
+  const childModel = select(model)
+  const childCtx: Ctx<unknown> = {
+    ...ctx,
+    dispatch: message => ctx.dispatch(toMessage(message)),
+  }
+  return buildChildren(parent, [binding], childModel, childCtx, referenceNode)
+}
+
+/**
+ * `Host` is the other half of the transparent boundary: it re-enters the
+ * frame its owning `Sub` captured (same model/dispatch that Sub mounted
+ * under) to mount consumer-authored, parent-typed layout from inside the
+ * child's own binding tree. Reading `frame.current` before the owning
+ * `Sub` has filled it, or after it has cleared on disposal, is a
+ * construction-guarantee violation the seam promises never happens for a
+ * `Host` produced by `submodel()`'s own wiring - the throw here names
+ * that guarantee for the (unsupported) case of a hand-built `Host`.
+ */
+const buildHost = <Model, Message>(
+  parent: Node & ParentNode,
+  hostBinding: Host<Model, Message>,
+  ctx: Ctx<Message>,
+  referenceNode: Node | null,
+): ReadonlyArray<Node> => {
+  const frame = hostBinding.frame.current
+  if (frame === undefined) {
+    throw new Error(
+      '[foldkit] Host mounted with no frame - a Host can only mount while ' +
+        'the Sub that produced it (via submodel()) is on the mount stack. ' +
+        'This is a construction guarantee submodel() is responsible for; ' +
+        'a hand-built Host outside that wiring is unsupported.',
+    )
+  }
+  const hostCtx: Ctx<unknown> = { ...ctx, dispatch: frame.dispatch }
+  return buildChildren(
+    parent,
+    [hostBinding.binding],
+    frame.model,
+    hostCtx,
+    referenceNode,
+  )
+}
+
 // TEMPLATE
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- List's Item is erased on the Binding union, mirroring binding.ts.
@@ -213,8 +357,16 @@ type TemplateSite =
   | Readonly<{ kind: 'text'; path: ReadonlyArray<number> }>
   | Readonly<{ kind: 'attr'; path: ReadonlyArray<number>; attrIndex: number }>
   | Readonly<{ kind: 'on'; path: ReadonlyArray<number>; attrIndex: number }>
+  | Readonly<{ kind: 'mount'; path: ReadonlyArray<number>; attrIndex: number }>
+  | Readonly<{
+      kind: 'unmount'
+      path: ReadonlyArray<number>
+      attrIndex: number
+    }>
   | Readonly<{ kind: 'list'; path: ReadonlyArray<number> }>
   | Readonly<{ kind: 'cond'; path: ReadonlyArray<number> }>
+  | Readonly<{ kind: 'sub'; path: ReadonlyArray<number> }>
+  | Readonly<{ kind: 'host'; path: ReadonlyArray<number> }>
 
 type ElementTemplate = Readonly<{
   root: Node
@@ -252,6 +404,14 @@ const buildTemplateNode = <Model, Message>(
       sites.push({ kind: 'on', path, attrIndex })
       return
     }
+    if (attrBinding._tag === 'Mount') {
+      sites.push({ kind: 'mount', path, attrIndex })
+      return
+    }
+    if (attrBinding._tag === 'Unmount') {
+      sites.push({ kind: 'unmount', path, attrIndex })
+      return
+    }
     if (typeof attrBinding.value === 'function') {
       sites.push({ kind: 'attr', path, attrIndex })
       return
@@ -261,14 +421,23 @@ const buildTemplateNode = <Model, Message>(
 
   binding.children.forEach((child, childIndex) => {
     const childPath = [...path, childIndex]
-    if (child._tag === 'List' || child._tag === 'Cond') {
+    if (
+      child._tag === 'List' ||
+      child._tag === 'Cond' ||
+      child._tag === 'Sub' ||
+      child._tag === 'Host'
+    ) {
       const anchor = ctx.document.createComment(child._tag)
       element.appendChild(anchor)
-      sites.push(
+      const kind =
         child._tag === 'List'
-          ? { kind: 'list', path: childPath }
-          : { kind: 'cond', path: childPath },
-      )
+          ? 'list'
+          : child._tag === 'Cond'
+            ? 'cond'
+            : child._tag === 'Sub'
+              ? 'sub'
+              : 'host'
+      sites.push({ kind, path: childPath })
       return
     }
     element.appendChild(buildTemplateNode(child, ctx, childPath, sites))
@@ -363,6 +532,20 @@ const instantiateFromTemplate = <Model, Message>(
         )
         break
       }
+      case 'mount': {
+        const mountBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as MountAttr<Model, Message>
+        buildMount(target as Element, mountBinding, ctx)
+        break
+      }
+      case 'unmount': {
+        const unmountBinding = (binding as El<Model, Message>).attrs[
+          site.attrIndex
+        ] as UnmountAttr<Model, Message>
+        buildUnmount(target as Element, unmountBinding, ctx)
+        break
+      }
       case 'cond': {
         setupCond(
           target.parentNode as Node & ParentNode,
@@ -370,6 +553,25 @@ const instantiateFromTemplate = <Model, Message>(
           binding as Cond<Model, Message>,
           model,
           ctx,
+        )
+        break
+      }
+      case 'sub': {
+        buildSub(
+          target.parentNode as Node & ParentNode,
+          binding as Sub<Model, Message>,
+          model,
+          ctx,
+          target.nextSibling,
+        )
+        break
+      }
+      case 'host': {
+        buildHost(
+          target.parentNode as Node & ParentNode,
+          binding as Host<Model, Message>,
+          ctx,
+          target.nextSibling,
         )
         break
       }
@@ -427,7 +629,12 @@ const instantiateListRow = <Model, Message, Item>(
   model: Model,
   ctx: Ctx<Message>,
 ): ReadonlyArray<Node> => {
-  if (rowBinding._tag === 'List' || rowBinding._tag === 'Cond') {
+  if (
+    rowBinding._tag === 'List' ||
+    rowBinding._tag === 'Cond' ||
+    rowBinding._tag === 'Sub' ||
+    rowBinding._tag === 'Host'
+  ) {
     return buildChildren(parent, [rowBinding], model, ctx, referenceNode)
   }
   const template = getOrBuildRowTemplate(listBinding, rowBinding, ctx)
@@ -678,6 +885,7 @@ export type MountOptions<Model, Message> = Readonly<{
   container: Element
   document: Document
   onThunkEvaluation?: () => void
+  runMountAction?: RunMountAction
 }>
 
 /** The handle {@link mount} returns. */
@@ -699,6 +907,7 @@ export const mount = <Model, Message>(
     document: options.document,
     dispatch: options.dispatch,
     onThunkEvaluation: options.onThunkEvaluation ?? undefined,
+    runMountAction: options.runMountAction ?? undefined,
   }
   const rootOwner = makeOwner(Option.none())
 

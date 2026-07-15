@@ -1,9 +1,10 @@
-import { Effect, Fiber, Match as M, Schema as S } from 'effect'
+import { Effect, Fiber, Match as M, Queue, Schema as S, Stream } from 'effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Command } from '../command/index.js'
-import { el, on, text } from '../experimental/bind/binding.js'
+import { cond, el, on, onMount, text } from '../experimental/bind/binding.js'
 import { m } from '../message/index.js'
+import type { MountAction } from '../mount/index.js'
 import type { SlowContext } from './runtime.js'
 import { makeApplication, makeElement } from './runtime.js'
 
@@ -288,6 +289,149 @@ describe('bindView', () => {
 
     await vi.waitFor(() => {
       expect(document.title).toBe('Count: 1')
+    })
+  })
+})
+
+// FIXTURES: a toggle-visibility app exercising runMountAction's real
+// Effect-context forking - a Mount under a Cond branch that gets disposed.
+
+const ToggledShow = m('ToggledShow')
+const MountCompleted = m('MountCompleted')
+const MountMessage = S.Union([ToggledShow, MountCompleted])
+type MountMessage = typeof MountMessage.Type
+
+const MountModel = S.Struct({ show: S.Boolean, mountCount: S.Number })
+type MountModel = typeof MountModel.Type
+
+const mountUpdate = (
+  model: MountModel,
+  message: MountMessage,
+): readonly [MountModel, ReadonlyArray<Command<MountMessage>>] =>
+  M.value(message).pipe(
+    M.withReturnType<
+      readonly [MountModel, ReadonlyArray<Command<MountMessage>>]
+    >(),
+    M.tagsExhaustive({
+      ToggledShow: () => [{ ...model, show: !model.show }, []],
+      MountCompleted: () => [
+        { ...model, mountCount: model.mountCount + 1 },
+        [],
+      ],
+    }),
+  )
+
+/** One-shot-with-cleanup MountAction, mirroring `html/onMount.test.ts`'s
+ *  `oneShotStream` fixture: emits `MountCompleted` once and registers
+ *  `release` as an `Effect.acquireRelease` finalizer, so the Stream's
+ *  scope (closed on fiber interrupt) is where `release` actually runs. */
+const makeMountedAction = (
+  release: () => void,
+): MountAction<MountMessage, never> => ({
+  name: 'Mounted',
+  f: () =>
+    Stream.callback<MountMessage>(queue =>
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            Queue.offerUnsafe(queue, MountCompleted())
+          }),
+          () => Effect.sync(release),
+        )
+        return yield* Effect.never
+      }),
+    ),
+})
+
+describe('bindView Mount actions', () => {
+  it('forks a Mount action fiber via the runtime Effect context and dispatches its emitted Message', async () => {
+    const mountView = el<MountModel, MountMessage>(
+      'div',
+      [],
+      [
+        text(model => `mounts:${model.mountCount}`),
+        cond<MountModel, MountMessage>(
+          model => (model.show ? 'shown' : 'hidden'),
+          key =>
+            key === 'shown'
+              ? el(
+                  'span',
+                  [onMount(makeMountedAction(() => {}))],
+                  [text('shown')],
+                )
+              : text('hidden'),
+        ),
+      ],
+    )
+
+    const application = makeElement<MountModel, MountMessage>({
+      Model: MountModel,
+      init: () => [{ show: true, mountCount: 0 }, []],
+      update: mountUpdate,
+      bindView: mountView,
+      container,
+      devTools: false,
+    })
+
+    runningFiber = Effect.runFork(application.start())
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('shown')
+      expect(container.textContent).toContain('mounts:1')
+    })
+  })
+
+  it('interrupts the Mount fiber when its element is disposed, running the acquireRelease finalizer', async () => {
+    let releaseCalls = 0
+
+    const mountView = el<MountModel, MountMessage>(
+      'div',
+      [],
+      [
+        el('button', [on('click', () => ToggledShow())], [text('toggle')]),
+        cond<MountModel, MountMessage>(
+          model => (model.show ? 'shown' : 'hidden'),
+          key =>
+            key === 'shown'
+              ? el(
+                  'span',
+                  [
+                    onMount(
+                      makeMountedAction(() => {
+                        releaseCalls += 1
+                      }),
+                    ),
+                  ],
+                  [text('shown')],
+                )
+              : text('hidden'),
+        ),
+      ],
+    )
+
+    const application = makeElement<MountModel, MountMessage>({
+      Model: MountModel,
+      init: () => [{ show: true, mountCount: 0 }, []],
+      update: mountUpdate,
+      bindView: mountView,
+      container,
+      devTools: false,
+    })
+
+    runningFiber = Effect.runFork(application.start())
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('shown')
+    })
+    expect(releaseCalls).toBe(0)
+
+    container.querySelector('button')?.click()
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('hidden')
+    })
+    await vi.waitFor(() => {
+      expect(releaseCalls).toBe(1)
     })
   })
 })

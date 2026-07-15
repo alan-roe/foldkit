@@ -1,7 +1,13 @@
-import { Option, String as String_ } from 'effect'
+import { Equal, Option, String as String_ } from 'effect'
 
 import type { VNode } from '../vdom.js'
-import { BIND_ADAPTED_KEY, attr, textContent } from './query.js'
+import {
+  BIND_ADAPTED_KEY,
+  attr,
+  mountMarkersOf,
+  textContent,
+  unmountMarkersOf,
+} from './query.js'
 
 type MatcherContext = Readonly<{ isNot: boolean }>
 
@@ -241,6 +247,64 @@ export const sceneMatchers = {
             ? `Expected element not to have handler "${name}" but it does.`
             : `Expected element to have handler "${name}" but it is not present.`,
       }),
+    })
+  },
+
+  toHaveMount(received: Option.Option<VNode>, name?: string) {
+    const described = name === undefined ? '' : ` "${name}"`
+    return Option.match(received, {
+      onNone: () => ({
+        pass: false,
+        message: () =>
+          `Expected element to have a pending Mount${described} but the element does not exist.`,
+      }),
+      onSome: vnode => {
+        const markers = mountMarkersOf(vnode)
+        const pass =
+          name === undefined
+            ? markers.length > 0
+            : markers.some(marker => marker.name === name)
+        return {
+          pass,
+          message: () =>
+            // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+            (this as unknown as MatcherContext).isNot
+              ? `Expected element not to have a pending Mount${described} but it does.`
+              : `Expected element to have a pending Mount${described} but it is not present.`,
+        }
+      },
+    })
+  },
+
+  /** Asserts a bind-path element carries an `onUnmount(message)` attribute
+   *  (materialize's `unmounts` field). No `html`-path equivalent exists:
+   *  Scene never diffs a live DOM, so `OnUnmount`'s destroy-hook dispatch
+   *  never fires there - this matcher only ever passes on bindView
+   *  programs. */
+  toHaveUnmount(received: Option.Option<VNode>, expectedMessage?: unknown) {
+    return Option.match(received, {
+      onNone: () => ({
+        pass: false,
+        message: () =>
+          'Expected element to have an onUnmount message but the element does not exist.',
+      }),
+      onSome: vnode => {
+        const markers = unmountMarkersOf(vnode)
+        const pass =
+          expectedMessage === undefined
+            ? markers.length > 0
+            : markers.some(marker =>
+                Equal.equals(marker.message, expectedMessage),
+              )
+        return {
+          pass,
+          message: () =>
+            // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+            (this as unknown as MatcherContext).isNot
+              ? 'Expected element not to have an onUnmount message but it does.'
+              : 'Expected element to have an onUnmount message but it is not present.',
+        }
+      },
     })
   },
 

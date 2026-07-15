@@ -2,6 +2,7 @@ import {
   Array,
   Context,
   Effect,
+  Equal,
   Function,
   Option,
   Predicate,
@@ -18,7 +19,6 @@ import type {
 } from '../experimental/bind/materialize.js'
 import { materializeKeyed } from '../experimental/bind/materialize.js'
 import type { File } from '../file/index.js'
-import type { FoldkitMountMarker } from '../html/index.js'
 import {
   FOLDKIT_MOUNT_KEY,
   FileHandlerSymbol,
@@ -67,13 +67,16 @@ import {
 import type { Locator, LocatorAll } from './query.js'
 import {
   BIND_ADAPTED_KEY,
+  BIND_UNMOUNT_KEY,
   accessibleDescription,
   accessibleName,
   ancestorsOf,
   attr,
+  mountMarkersOf,
   resolveTarget,
   selector,
   textContent,
+  unmountMarkersOf,
   within,
 } from './query.js'
 import {
@@ -253,11 +256,7 @@ const collectRenderedSlots = (vnode: VNode): ReadonlyArray<PendingMount> => {
   const counts = new Map<string, number>()
   const slots: Array<PendingMount> = []
   const walk = (node: VNode): void => {
-    /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
-    const marker = node.data?.[FOLDKIT_MOUNT_KEY] as
-      | FoldkitMountMarker
-      | undefined
-    if (marker !== undefined) {
+    for (const marker of mountMarkersOf(node)) {
       const occurrence = counts.get(marker.name) ?? 0
       counts.set(marker.name, occurrence + 1)
       const slotWithArgs: PendingMount =
@@ -490,7 +489,12 @@ const materializedNodeToVNodeChild = (
  *  rewired from a bare `toMessage` thunk into a listener that dispatches
  *  through `dispatch`, mirroring how the `html` factory's `OnClick`/`OnInput`
  *  etc. close over the runtime dispatch at build time. `BIND_ADAPTED_KEY` is
- *  stamped so matchers (`toHaveHook`) can recognize a bindView-adapted node. */
+ *  stamped so matchers (`toHaveHook`) can recognize a bindView-adapted node.
+ *  `element.mounts`/`element.unmounts` are stamped onto the same
+ *  `FOLDKIT_MOUNT_KEY`/`BIND_UNMOUNT_KEY` data keys the `html` render path
+ *  and `mountMarkersOf`/`unmountMarkersOf` already read, so Mount tracking
+ *  (`collectRenderedSlots`, `Scene.Mount.*`, `toHaveMount`/`toHaveUnmount`)
+ *  works identically for bindView programs with no walker changes. */
 const materializedElementToVNode = (
   element: MaterializedElement,
   dispatch: DispatchService,
@@ -502,14 +506,22 @@ const materializedElementToVNode = (
       dispatch.dispatchSync(toMessage(event))
     }
   }
+  /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
+  const data = {
+    attrs,
+    class: classes,
+    on,
+    [BIND_ADAPTED_KEY]: true,
+    ...(element.mounts === undefined
+      ? {}
+      : { [FOLDKIT_MOUNT_KEY]: element.mounts }),
+    ...(element.unmounts === undefined
+      ? {}
+      : { [BIND_UNMOUNT_KEY]: element.unmounts }),
+  } as VNode['data']
   return {
     sel: element.tag,
-    data: {
-      attrs,
-      class: classes,
-      on,
-      [BIND_ADAPTED_KEY]: true,
-    },
+    data,
     children: element.children.map(child =>
       materializedNodeToVNodeChild(child, dispatch),
     ),
@@ -1883,6 +1895,39 @@ const assertHasHandler = (name: string): SceneAssertion =>
     `have handler "${name}"`,
   )
 
+const assertHasMount = (name?: string): SceneAssertion =>
+  assertOnElement(
+    vnode => {
+      const markers = mountMarkersOf(vnode)
+      return {
+        pass:
+          name === undefined
+            ? markers.length > 0
+            : markers.some(marker => marker.name === name),
+        actual: 'it is not present',
+      }
+    },
+    `have a pending Mount${name === undefined ? '' : ` "${name}"`}`,
+  )
+
+/** Asserts a bind-path element carries an `onUnmount(message)` attribute.
+ *  No `html`-path equivalent: Scene never diffs a live DOM, so `OnUnmount`'s
+ *  destroy-hook dispatch never fires there - this assertion only ever
+ *  passes on bindView programs. */
+const assertHasUnmount = (expectedMessage?: unknown): SceneAssertion =>
+  assertOnElement(vnode => {
+    const markers = unmountMarkersOf(vnode)
+    return {
+      pass:
+        expectedMessage === undefined
+          ? markers.length > 0
+          : markers.some(marker =>
+              Equal.equals(marker.message, expectedMessage),
+            ),
+      actual: 'it is not present',
+    }
+  }, 'have an onUnmount message')
+
 const assertHasValue = (expected: string): SceneAssertion =>
   assertOnElement(vnode => {
     const actualValue = attr(vnode, 'value')
@@ -2028,6 +2073,10 @@ const buildExpectChain = (locator: Locator, isNot: boolean) => ({
   toHaveAccessibleDescription: (expected: string | RegExp) =>
     wrapAssertion(locator, assertHasAccessibleDescription(expected), isNot),
   toBeChecked: () => wrapAssertion(locator, assertIsChecked, isNot),
+  toHaveMount: (name?: string) =>
+    wrapAssertion(locator, assertHasMount(name), isNot),
+  toHaveUnmount: (expectedMessage?: unknown) =>
+    wrapAssertion(locator, assertHasUnmount(expectedMessage), isNot),
 })
 
 /** Creates an inline assertion step. Resolves the Locator against

@@ -1,3 +1,27 @@
+import type { MountAction } from '../../mount/index.js'
+
+// FRAME
+
+/** The mount-time frame a `Sub` boundary shares with its `Host` islands and
+ *  lifted `viewInputs`: filled by the engine (and by {@link materialize})
+ *  when the `Sub` mounts, cleared on owner disposal.
+ *
+ *  NOTE: one binding-tree instance mounts at most once concurrently - a
+ *  `Sub` mount overwrites the cell, disposal clears it. Store tracking
+ *  works regardless: it is proxy-based, not frame-based, so a thunk
+ *  reading `cell.current.model.someField` inside a render effect tracks
+ *  through the parent store's per-path signals no matter which frame the
+ *  effect was created under. */
+export type Frame = Readonly<{
+  model: unknown
+  dispatch: (message: unknown) => void
+}>
+
+/** A mutable box holding the current {@link Frame} for one `Sub` boundary,
+ *  shared by reference between the `Sub` and every `Host`/lifted `Bound`
+ *  it produced. */
+export type FrameCell = { current: Frame | undefined }
+
 // BOUND
 
 /**
@@ -26,11 +50,32 @@ export type On<_Model, Message> = Readonly<{
   toMessage: (event: Event) => Message
 }>
 
-/** A binding attached to an element: a static/bound attribute or an event
- *  listener. */
+/** An attribute-position binding that starts an Effect fiber when the
+ *  element mounts, dispatching each Message the action's Stream emits.
+ *  Interrupted on unmount. `MountAction`'s exact shape lives in
+ *  `../../mount/index.js`; imported type-only to avoid a runtime import
+ *  from `html/`. */
+export type MountAttr<_Model, Message> = Readonly<{
+  _tag: 'Mount'
+  action: MountAction<Message, unknown>
+}>
+
+/** An attribute-position binding that dispatches `message` when the
+ *  element unmounts, registered as an owner-ordered cleanup - no snapshot
+ *  or registry lookup, since the composed dispatch closure is immortal
+ *  data. */
+export type UnmountAttr<_Model, Message> = Readonly<{
+  _tag: 'Unmount'
+  message: Message
+}>
+
+/** A binding attached to an element: a static/bound attribute, an event
+ *  listener, or a mount/unmount lifecycle hook. */
 export type AttrBinding<Model, Message> =
   | Attr<Model, Message>
   | On<Model, Message>
+  | MountAttr<Model, Message>
+  | UnmountAttr<Model, Message>
 
 // BINDING
 
@@ -70,6 +115,36 @@ export type Cond<Model, Message> = Readonly<{
 }>
 
 /**
+ * A child Submodel boundary: `select` derives the child's store view from
+ * `Model`, `toMessage` composes a child Message into `Message`, and
+ * `binding` is the child's own tree - built ONCE by {@link submodel}
+ * invoking the child view. `Child`/`ChildMessage` are erased on the union
+ * (same precedent as `List`'s `Item`); `frame` is the mount-time cell this
+ * `Sub` shares with every `Host` island its `viewInputs` wrapping produced.
+ */
+export type Sub<Model, Message> = Readonly<{
+  _tag: 'Sub'
+  select: Bound<Model, unknown>
+  toMessage: (childMessage: unknown) => Message
+  binding: Binding<unknown, unknown>
+  frame: FrameCell
+}>
+
+/**
+ * An outer-frame island produced only by {@link submodel}'s `viewInputs`
+ * wrapping - never constructed directly. Re-enters the parent frame for
+ * consumer-authored layout composed around a `Sub`'s published groups;
+ * `Model`/`Message` are phantom (this node's real content is parent-typed,
+ * read back out through `frame` at mount/materialize time, the same
+ * erasure-with-construction-guarantee precedent as `List`'s `Item`).
+ */
+export type Host<_Model, _Message> = Readonly<{
+  _tag: 'Host'
+  binding: Binding<unknown, unknown>
+  frame: FrameCell
+}>
+
+/**
  * A view description: pure data describing how to render `Model`, shared by
  * the live renderer and the {@link materialize} test path.
  */
@@ -79,6 +154,8 @@ export type Binding<Model, Message> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Item is an existential, captured per `list()` call site and erased here.
   | List<Model, Message, any>
   | Cond<Model, Message>
+  | Sub<Model, Message>
+  | Host<Model, Message>
 
 // CONSTRUCTORS
 
@@ -118,3 +195,16 @@ export const cond = <Model, Message>(
   discriminant: Bound<Model, string>,
   renderBranch: (key: string) => Binding<Model, Message>,
 ): Binding<Model, Message> => ({ _tag: 'Cond', discriminant, renderBranch })
+
+/** Constructs a mount hook: starts `action`'s Effect fiber when the element
+ *  mounts, dispatching each Message its Stream emits; interrupted on
+ *  unmount. */
+export const onMount = <Model, Message>(
+  action: MountAction<Message, unknown>,
+): AttrBinding<Model, Message> => ({ _tag: 'Mount', action })
+
+/** Constructs an unmount hook: dispatches `message` when the element is
+ *  removed from the DOM. */
+export const onUnmount = <Model, Message>(
+  message: Message,
+): AttrBinding<Model, Message> => ({ _tag: 'Unmount', message })

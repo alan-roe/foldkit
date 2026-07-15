@@ -1,3 +1,4 @@
+import { Stream } from 'effect'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import {
@@ -9,6 +10,8 @@ import {
   el,
   list,
   on,
+  onMount,
+  onUnmount,
   text,
 } from './binding.js'
 
@@ -112,6 +115,29 @@ describe('on', () => {
       event: 'click',
       toMessage,
     })
+  })
+})
+
+describe('onMount', () => {
+  it('wraps a MountAction under the Mount tag', () => {
+    const action = {
+      name: 'Measure',
+      f: () => Stream.succeed({ _tag: 'ClearedTodos' as const }),
+    }
+
+    const binding = onMount<Model, Message>(action)
+
+    expect(binding).toStrictEqual({ _tag: 'Mount', action })
+  })
+})
+
+describe('onUnmount', () => {
+  it('wraps a Message under the Unmount tag', () => {
+    const message: Message = { _tag: 'ClearedTodos' }
+
+    const binding = onUnmount<Model, Message>(message)
+
+    expect(binding).toStrictEqual({ _tag: 'Unmount', message })
   })
 })
 

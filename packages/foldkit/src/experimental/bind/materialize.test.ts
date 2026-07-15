@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { attr, cond, el, list, on, text } from './binding.js'
+import {
+  type FrameCell,
+  type Host,
+  type Sub,
+  attr,
+  cond,
+  el,
+  list,
+  on,
+  text,
+} from './binding.js'
 import { type MaterializedNode, materialize } from './materialize.js'
 
 // FIXTURES
@@ -206,5 +216,99 @@ describe('materialize', () => {
       typeof value === 'function' ? '[function]' : value,
     )
     expect(after).toBe(before)
+  })
+})
+
+// SUB / HOST
+
+type ChildModel = Readonly<{ count: number }>
+type ChildMessage = Readonly<{ _tag: 'Bumped' }>
+
+type ParentModel = Readonly<{ child: ChildModel; label: string }>
+type ParentMessage =
+  | Readonly<{ _tag: 'GotChild'; message: ChildMessage }>
+  | Readonly<{ _tag: 'Cleared' }>
+
+const toGotChild = (message: ChildMessage): ParentMessage => ({
+  _tag: 'GotChild',
+  message,
+})
+
+describe('materialize: Sub/Host', () => {
+  it('crosses a Sub boundary, materializing its binding against select(model) and pre-composing toMessage into every collected handler', () => {
+    const cell: FrameCell = { current: undefined }
+    const sub: Sub<ParentModel, ParentMessage> = {
+      _tag: 'Sub',
+      select: model => model.child,
+      toMessage: message => toGotChild(message as ChildMessage),
+      binding: el('button', [on('click', () => ({ _tag: 'Bumped' }))], []),
+      frame: cell,
+    }
+    const model: ParentModel = { child: { count: 3 }, label: 'x' }
+
+    const result = materialize(sub, model)
+
+    if (result._tag !== 'MaterializedElement') {
+      throw new Error('expected a MaterializedElement')
+    }
+    expect(result.handlers['click']?.(new Event('click'))).toStrictEqual(
+      toGotChild({ _tag: 'Bumped' }),
+    )
+  })
+
+  it('fills the frame cell with the Sub-boundary model before recursing, so a nested Host reads it back', () => {
+    const cell: FrameCell = { current: undefined }
+    const host: Host<ChildModel, ChildMessage> = {
+      _tag: 'Host',
+      binding: text(model => (model as ParentModel).label),
+      frame: cell,
+    }
+    const sub: Sub<ParentModel, ParentMessage> = {
+      _tag: 'Sub',
+      select: model => model.child,
+      toMessage: message => toGotChild(message as ChildMessage),
+      binding: el('div', [], [host]),
+      frame: cell,
+    }
+    const model: ParentModel = { child: { count: 3 }, label: 'parent label' }
+
+    const result = materialize(sub, model)
+
+    if (result._tag !== 'MaterializedElement') {
+      throw new Error('expected a MaterializedElement')
+    }
+    expect(result.children[0]).toStrictEqual({
+      _tag: 'MaterializedText',
+      text: 'parent label',
+    })
+  })
+
+  it('throws when a Host is materialized before its owning Sub filled the frame cell', () => {
+    const orphanCell: FrameCell = { current: undefined }
+    const host: Host<ChildModel, ChildMessage> = {
+      _tag: 'Host',
+      binding: text('unreachable'),
+      frame: orphanCell,
+    }
+
+    expect(() => materialize(host, { count: 0 } satisfies ChildModel)).toThrow(
+      /owning Sub filled the frame cell/,
+    )
+  })
+
+  it('gives a Sub an inert dispatch that throws if invoked', () => {
+    const cell: FrameCell = { current: undefined }
+    const sub: Sub<ParentModel, ParentMessage> = {
+      _tag: 'Sub',
+      select: model => model.child,
+      toMessage: message => toGotChild(message as ChildMessage),
+      binding: text('child'),
+      frame: cell,
+    }
+
+    materialize(sub, { child: { count: 0 }, label: '' })
+
+    expect(cell.current).toBeDefined()
+    expect(() => cell.current?.dispatch({ _tag: 'Bumped' })).toThrow(/inert/)
   })
 })

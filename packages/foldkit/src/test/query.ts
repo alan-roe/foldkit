@@ -13,6 +13,7 @@ import {
 } from 'effect'
 import { dual } from 'effect/Function'
 
+import { FOLDKIT_MOUNT_KEY } from '../html/index.js'
 import { evo } from '../struct/index.js'
 import type { VNode } from '../vdom.js'
 
@@ -21,6 +22,58 @@ import type { VNode } from '../vdom.js'
  *  render. Lets matchers (`toHaveHook`) give bindView-specific guidance
  *  without coupling `query.ts`/`matchers.ts` to `experimental/bind`. */
 export const BIND_ADAPTED_KEY = 'foldkitBindAdapted' as const
+
+/** `VNodeData` key stamped on bind-path elements carrying `UnmountAttr`
+ *  markers - the bind path's only source of unmount lifecycle data, since
+ *  Scene never diffs a live DOM (there is no `html`-path equivalent to
+ *  mirror: `OnUnmount` fires through a live snabbdom `destroy` hook, which
+ *  Scene's fresh-materialize-per-step model never runs). */
+export const BIND_UNMOUNT_KEY = 'foldkitBindUnmount' as const
+
+/** A single pending-Mount marker: the shape both the `html` factory's
+ *  `OnMount` stamping and the bind path's materialized `mounts` field
+ *  populate, so `collectRenderedSlots`/`toHaveMount` read either render
+ *  path identically. */
+export type MountMarker = Readonly<{
+  name: string
+  args?: Record<string, unknown>
+  messageMappers?: ReadonlyArray<(message: unknown) => unknown>
+}>
+
+/** A single pending-Unmount marker: the bind path's materialized
+ *  `unmounts` field. `message` is already parent-typed by materialize's
+ *  handler pre-composition. */
+export type UnmountMarker = Readonly<{ message: unknown }>
+
+/** Reads every Mount marker stamped on `vnode`: a single marker on the
+ *  `html` render path (one `OnMount` per element), or an array on the bind
+ *  path (materialize's `mounts` field allows more than one `onMount` per
+ *  element). */
+export const mountMarkersOf = (vnode: VNode): ReadonlyArray<MountMarker> => {
+  const raw = vnode.data?.[FOLDKIT_MOUNT_KEY]
+  if (raw === undefined) {
+    return []
+  }
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- `raw` is untyped VNodeData; this stamps/reads the same marker shape by construction (see materializedElementToVNode / the html OnMount hook).
+  return Array.isArray(raw)
+    ? (raw as ReadonlyArray<MountMarker>)
+    : [raw as MountMarker]
+}
+
+/** Reads every Unmount marker stamped on `vnode` (bind path only - see
+ *  {@link BIND_UNMOUNT_KEY}). */
+export const unmountMarkersOf = (
+  vnode: VNode,
+): ReadonlyArray<UnmountMarker> => {
+  const raw = vnode.data?.[BIND_UNMOUNT_KEY]
+  if (raw === undefined) {
+    return []
+  }
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- see mountMarkersOf.
+  return Array.isArray(raw)
+    ? (raw as ReadonlyArray<UnmountMarker>)
+    : [raw as UnmountMarker]
+}
 
 // SELECTOR PARSING
 

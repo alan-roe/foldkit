@@ -1,5 +1,6 @@
 export * from './binding.js'
 export * from './helpers.js'
 export * from './materialize.js'
+export * from './submodel.js'
 export * from './render.js'
 export * from './tags.js'

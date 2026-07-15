@@ -62,6 +62,7 @@ import type {
   ManagedResources,
 } from '../managedResource/index.js'
 import { MountTracker } from '../mount/index.js'
+import type { MountAction } from '../mount/index.js'
 import { UrlRequest } from '../navigation/urlRequest.js'
 import {
   type Inbound,
@@ -2119,12 +2120,45 @@ const makeRuntime = <
               if (Option.isNone(bindViewRuntime)) {
                 /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions */
                 const store = makeModelStore(model as Model & object)
+                // NOTE: mirrors the snabbdom OnMount hooks' fiber-per-mount
+                // semantics (`html/index.ts` `OnMount` insert/destroy hooks):
+                // fork `action.f(element)` under the runtime's own Effect
+                // context so Commands/services it depends on resolve the
+                // same way a Command would, dispatch every emitted Message,
+                // and hand back an interrupt for `render.ts` to register via
+                // `onCleanup`. Unlike the snabbdom path this isn't wired
+                // through `MountTracker`/DevTools mount history yet - the
+                // bindView path has no DevTools mount buffer today.
+                const runMountAction = (
+                  action: MountAction<unknown, unknown>,
+                  element: Element,
+                  mountDispatch: (message: unknown) => void,
+                ): (() => void) => {
+                  const fiber = Effect.runForkWith(runtimeContext)(
+                    Stream.runForEach(action.f(element), message =>
+                      Effect.sync(() => mountDispatch(message)),
+                    ).pipe(
+                      Effect.catchCause(cause =>
+                        Effect.sync(() => {
+                          console.error(
+                            `[Mount ${action.name}] unhandled failure`,
+                            cause,
+                          )
+                        }),
+                      ),
+                    ),
+                  )
+                  return (): void => {
+                    Effect.runFork(Fiber.interrupt(fiber))
+                  }
+                }
                 const mounted = mount({
                   binding: bindView.body,
                   view: store.view,
                   dispatch: swappableDispatch,
                   container,
                   document: window.document,
+                  runMountAction,
                 })
                 bindViewRuntime = Option.some({ store, mounted })
 
