@@ -13,6 +13,7 @@ packages/website/public/fonts/ABCFavorit-Book.woff2
 packages/website/public/fonts/ABCFavorit-Light.woff2
 packages/oxlint-plugin-foldkit/recommended.json
 packages/oxlint-plugin-foldkit/all.json
+packages/oxlint-plugin-foldkit/experimental.json
 .playwright-mcp/
 playwright-report/
 test-results/

@@ -12,6 +12,7 @@ import { messageBindingMatchesTag } from './rules/message-binding-matches-tag.ts
 import { mountFactoryMustUseElement } from './rules/mount-factory-must-use-element.ts'
 import { noArrayIndexViewKeys } from './rules/no-array-index-view-keys.ts'
 import { noChildMessageConstructionInRoot } from './rules/no-child-message-construction-in-root.ts'
+import { noDerivedInViewBodies } from './rules/no-derived-in-view-bodies.ts'
 import { noDisablingDevGuardrails } from './rules/no-disabling-dev-guardrails.ts'
 import { noDuplicateOnmountPerElement } from './rules/no-duplicate-onmount-per-element.ts'
 import { noEagerBindReads } from './rules/no-eager-bind-reads.ts'
@@ -59,6 +60,7 @@ const RECOMMENDED_RULE_NAMES = [
 // itself is experimental and most apps do not use it yet, so its rules
 // live only in `all` and in the dedicated `experimental` preset below.
 const EXPERIMENTAL_RULE_NAMES = [
+  'no-derived-in-view-bodies',
   'no-eager-bind-reads',
   'bind-handlers-no-model-reads',
 ] as const
@@ -94,6 +96,7 @@ const basePlugin = Plugin.define({
     'wrap-child-output-in-got-message': wrapChildOutputInGotMessage,
     'no-eager-bind-reads': noEagerBindReads,
     'bind-handlers-no-model-reads': bindHandlersNoModelReads,
+    'no-derived-in-view-bodies': noDerivedInViewBodies,
   },
   recommended: {
     rules: RECOMMENDED_RULE_NAMES,

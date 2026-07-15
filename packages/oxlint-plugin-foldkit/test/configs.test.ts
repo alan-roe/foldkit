@@ -51,6 +51,9 @@ describe('configs', () => {
           'foldkit/bind-handlers-no-model-reads'
         ],
       ).toBeUndefined()
+      expect(
+        plugin.configs.recommended.rules['foldkit/no-derived-in-view-bodies'],
+      ).toBeUndefined()
     })
   })
 
@@ -61,6 +64,9 @@ describe('configs', () => {
       )
       expect(
         plugin.configs.all.rules['foldkit/bind-handlers-no-model-reads'],
+      ).toBe('error')
+      expect(
+        plugin.configs.all.rules['foldkit/no-derived-in-view-bodies'],
       ).toBe('error')
       expect(
         plugin.configs.all.rules[
@@ -74,6 +80,7 @@ describe('configs', () => {
     it('enables exactly the Bind view rules at error severity', () => {
       expect(Object.keys(plugin.configs.experimental.rules).sort()).toEqual([
         'foldkit/bind-handlers-no-model-reads',
+        'foldkit/no-derived-in-view-bodies',
         'foldkit/no-eager-bind-reads',
       ])
       expect(
@@ -83,6 +90,9 @@ describe('configs', () => {
         plugin.configs.experimental.rules[
           'foldkit/bind-handlers-no-model-reads'
         ],
+      ).toBe('error')
+      expect(
+        plugin.configs.experimental.rules['foldkit/no-derived-in-view-bodies'],
       ).toBe('error')
     })
   })
